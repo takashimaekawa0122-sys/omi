@@ -51,16 +51,16 @@ workflows:
           # _ProdEnv / _DevEnv クラスと l10n / assets を一括生成
           dart run build_runner build --delete-conflicting-outputs
 
-      - name: GoogleService-Info.plist を ios/Config/Dev・Prod に配置
+      - name: GoogleService-Info.plist を全必要箇所に配置
         script: |
-          # Xcodeの "Copy Google Plist file" スクリプトが以下を参照する:
-          #   Release-dev → ${PROJECT_DIR}/Config/Dev/GoogleService-Info.plist
-          #   Release-prod → ${PROJECT_DIR}/Config/Prod/GoogleService-Info.plist
+          # 1) Xcodeの "Copy Google Plist file" スクリプトが参照するフレーバー別パス
           mkdir -p app/ios/Config/Dev
           mkdir -p app/ios/Config/Prod
           cp app/setup/prebuilt/GoogleService-Info.plist app/ios/Config/Dev/GoogleService-Info.plist
           cp app/setup/prebuilt/GoogleService-Info.plist app/ios/Config/Prod/GoogleService-Info.plist
-          echo "GoogleService-Info.plist を Config/Dev・Prod に配置しました"
+          # 2) Xcodeプロジェクトのリソース参照（PBXBuildFile）が直接要求するパス
+          cp app/setup/prebuilt/GoogleService-Info.plist app/ios/Runner/GoogleService-Info.plist
+          echo "GoogleService-Info.plist を Config/Dev・Prod・Runner に配置しました"
 
       - name: CocoaPods インストール
         script: |
