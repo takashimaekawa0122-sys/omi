@@ -43,37 +43,18 @@ workflows:
         script: |
           cd ios && pod install --repo-update
 
-      - name: xcodebuild でビルド（Flutter PATH 明示 + FRAMEWORK_SEARCH_PATHS 直接渡し）
+      - name: Flutter iOSビルド（署名なし・devフレーバー）
         script: |
-          # Generated.xcconfig から FLUTTER_ROOT を取得
-          FLUTTER_ROOT_VAL=$(grep 'FLUTTER_ROOT=' ios/Flutter/Generated.xcconfig | head -1 | sed 's/FLUTTER_ROOT=//' | tr -d '\r\n')
-          FLUTTER_ENGINE="${FLUTTER_ROOT_VAL}/bin/cache/artifacts/engine/ios-release"
-          FLUTTER_ARM64="${FLUTTER_ENGINE}/Flutter.xcframework/ios-arm64"
-
-          echo "FLUTTER_ROOT: $FLUTTER_ROOT_VAL"
-          echo "FLUTTER_ARM64: $FLUTTER_ARM64"
-          ls "$FLUTTER_ARM64/Flutter.framework" 2>/dev/null && echo "Flutter.framework OK" || echo "WARNING: Flutter.framework not found"
-
-          # xcode_backend.sh（Dart コンパイルスクリプト）が flutter を呼べるよう PATH に追加
-          export PATH="${FLUTTER_ROOT_VAL}/bin:${PATH}"
-          export FLUTTER_ROOT="${FLUTTER_ROOT_VAL}"
-
-          xcodebuild \
-            -workspace ios/Runner.xcworkspace \
-            -scheme dev \
-            -configuration Release-dev \
-            -sdk iphoneos \
-            -archivePath build/ios/archive/Runner.xcarchive \
-            FRAMEWORK_SEARCH_PATHS="\$(inherited) ${FLUTTER_ARM64}" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            archive
+          flutter build ios \
+            --release \
+            --no-codesign \
+            --flavor dev \
+            --no-pub
 
       - name: .ipa パッケージング
         script: |
           mkdir -p build/ios/ipa/Payload
-          cp -r "build/ios/archive/Runner.xcarchive/Products/Applications/Runner.app" build/ios/ipa/Payload/
+          cp -r build/ios/iphoneos/Runner.app build/ios/ipa/Payload/
           cd build/ios/ipa
           zip -r ../../Runner-unsigned.ipa Payload/
 
