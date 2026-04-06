@@ -65,7 +65,9 @@ workflows:
       - name: CocoaPods インストール
         script: |
           cd app/ios
-          pod install --repo-update
+          # --repo-update を外す: flutter pub get が生成した .symlinks のspecを使う
+          # --repo-update を付けると Firebase SDK を GitHub から直接 clone しようとして失敗する
+          pod install
 
       - name: Flutterビルド（unsigned・devフレーバー）
         script: |
