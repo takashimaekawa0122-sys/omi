@@ -144,7 +144,11 @@ Future _init() async {
   }
 
   // A.I.S.A. Firestore初期化（失敗してもアプリは続行）
-  await AisaFirestoreService.instance.initialize();
+  // [A.I.S.A.] 10秒タイムアウト: signInAnonymously()のネットワーク待ちでブロックしないよう保護
+  await AisaFirestoreService.instance.initialize().timeout(
+    const Duration(seconds: 10),
+    onTimeout: () => debugPrint('[AISA] Firestore初期化タイムアウト（10s）— スキップして続行'),
+  );
 
   await PlatformManager.initializeServices();
   await NotificationService.instance.initialize();
@@ -175,9 +179,21 @@ Future _init() async {
     }
   }
 
-  // DEBUG: Log Firebase Auth state before getIdToken
+  // [A.I.S.A.] 10秒タイムアウト: トークンリフレッシュのネットワーク待ちでブロックしないよう保護
   print('DEBUG main: Before getIdToken - currentUser=${FirebaseAuth.instance.currentUser?.uid}');
-  bool isAuth = (await AuthService.instance.getIdToken()) != null;
+  String? idToken;
+  try {
+    idToken = await AuthService.instance.getIdToken().timeout(
+      const Duration(seconds: 10),
+      onTimeout: () {
+        debugPrint('[AISA] getIdToken timed out (10s) — continuing without auth');
+        return null;
+      },
+    );
+  } catch (e) {
+    debugPrint('[AISA] getIdToken error: $e');
+  }
+  bool isAuth = idToken != null;
   print('DEBUG main: After getIdToken - isAuth=$isAuth, currentUser=${FirebaseAuth.instance.currentUser?.uid}');
   if (isAuth) {
     PlatformManager.instance.mixpanel.identify();
@@ -185,7 +201,11 @@ Future _init() async {
     // This handles the case where cached credentials are used on startup
     if (!SharedPreferencesUtil().onboardingCompleted) {
       print('DEBUG main: Restoring onboarding state from server...');
-      await AuthService.instance.restoreOnboardingState();
+      // [A.I.S.A.] 10秒タイムアウト: APIハングでブロックしないよう保護
+      await AuthService.instance.restoreOnboardingState().timeout(
+        const Duration(seconds: 10),
+        onTimeout: () => debugPrint('[AISA] restoreOnboardingState timed out (10s) — skipping'),
+      );
       print('DEBUG main: After restore - onboardingCompleted=${SharedPreferencesUtil().onboardingCompleted}');
     }
   }
