@@ -24,6 +24,10 @@ workflows:
       - name: Flutter依存関係インストール
         script: flutter pub get
 
+      - name: .dev.env 生成（build_runner の前提条件）
+        script: |
+          cp .env.template .dev.env
+
       - name: コード生成（build_runner）
         script: |
           dart run build_runner build --delete-conflicting-outputs
