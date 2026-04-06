@@ -1,14 +1,14 @@
 workflows:
   aisa-ios-unsigned:
     name: "A.I.S.A. iOS (Unsigned IPA)"
-    max_build_duration: 90
+    max_build_duration: 120
     instance_type: mac_mini_m2
     working_directory: app
 
     environment:
-      flutter: stable
-      xcode: latest
-      cocoapods: default
+      flutter: 3.35.3      # 公式Omiと同じバージョンに固定
+      xcode: 16.4          # 公式Omiと同じバージョンに固定
+      cocoapods: 1.16.2    # 公式Omiと同じバージョンに固定
 
     cache:
       cache_paths:
@@ -16,15 +16,36 @@ workflows:
         - $HOME/Library/Caches/CocoaPods
 
     scripts:
+      - name: Opus インストール
+        script: |
+          brew install opus
+          brew install opus-tools
+
       - name: Flutter依存関係インストール
         script: flutter pub get
+
+      - name: コード生成（build_runner）
+        script: |
+          dart run build_runner build --delete-conflicting-outputs
+
+      - name: Generated.xcconfig 生成（pod install の前提条件）
+        script: |
+          flutter build ios \
+            --config-only \
+            --no-codesign \
+            --flavor dev
+
+      - name: CocoaPods インストール
+        script: |
+          cd ios && pod install --repo-update
 
       - name: Flutter iOSビルド（署名なし・devフレーバー）
         script: |
           flutter build ios \
             --release \
             --no-codesign \
-            --flavor dev
+            --flavor dev \
+            --no-pub
 
       - name: .ipa パッケージング
         script: |
