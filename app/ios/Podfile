@@ -86,6 +86,26 @@ post_install do |installer|
 
     end
   end
+
+  # Fix: Runner.xcodeproj の Runner ターゲットにも同じパスを追加
+  # （Runnerターゲットの FRAMEWORK_SEARCH_PATHS は xcconfig 経由のため別途対応が必要）
+  flutter_path = '$(PODS_ROOT)/../.symlinks/flutter/ios-release/Flutter.xcframework/ios-arm64'
+  installer.aggregate_targets.each do |aggregate_target|
+    aggregate_target.user_project.targets.each do |target|
+      next unless target.name == 'Runner'
+      target.build_configurations.each do |config|
+        fsp = config.build_settings['FRAMEWORK_SEARCH_PATHS']
+        if fsp.nil?
+          config.build_settings['FRAMEWORK_SEARCH_PATHS'] = ['$(inherited)', flutter_path]
+        elsif fsp.is_a?(Array)
+          config.build_settings['FRAMEWORK_SEARCH_PATHS'] << flutter_path unless fsp.include?(flutter_path)
+        else
+          config.build_settings['FRAMEWORK_SEARCH_PATHS'] = "#{fsp} #{flutter_path}" unless fsp.include?(flutter_path)
+        end
+      end
+    end
+    aggregate_target.user_project.save
+  end
 #   ################  Awesome Notifications pod modification 1 ###################
 #   awesome_pod_file = File.expand_path(File.join('plugins', 'awesome_notifications', 'ios', 'Scripts', 'AwesomePodFile'), '.symlinks')
 #   require awesome_pod_file
