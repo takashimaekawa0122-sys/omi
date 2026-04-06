@@ -43,20 +43,20 @@ workflows:
         script: |
           cd ios && pod install --repo-update
 
-      - name: Flutter パスを確認してから xcodebuild でビルド
+      - name: xcodebuild でビルド（Flutter PATH 明示 + FRAMEWORK_SEARCH_PATHS 直接渡し）
         script: |
           # Generated.xcconfig から FLUTTER_ROOT を取得
           FLUTTER_ROOT_VAL=$(grep 'FLUTTER_ROOT=' ios/Flutter/Generated.xcconfig | head -1 | sed 's/FLUTTER_ROOT=//' | tr -d '\r\n')
           FLUTTER_ENGINE="${FLUTTER_ROOT_VAL}/bin/cache/artifacts/engine/ios-release"
+          FLUTTER_ARM64="${FLUTTER_ENGINE}/Flutter.xcframework/ios-arm64"
 
-          echo "=== Flutter Engine Path ==="
-          echo "$FLUTTER_ENGINE"
-          ls "$FLUTTER_ENGINE/" || echo "ERROR: engine path not found"
-          ls "$FLUTTER_ENGINE/Flutter.xcframework/" 2>/dev/null || echo "ERROR: Flutter.xcframework not found"
+          echo "FLUTTER_ROOT: $FLUTTER_ROOT_VAL"
+          echo "FLUTTER_ARM64: $FLUTTER_ARM64"
+          ls "$FLUTTER_ARM64/Flutter.framework" 2>/dev/null && echo "Flutter.framework OK" || echo "WARNING: Flutter.framework not found"
 
-          # Flutter.xcframework 内の arm64 スライスを探す
-          FLUTTER_ARM64=$(ls -d "$FLUTTER_ENGINE/Flutter.xcframework/ios-arm64" 2>/dev/null | head -1)
-          echo "Flutter arm64 slice: $FLUTTER_ARM64"
+          # xcode_backend.sh（Dart コンパイルスクリプト）が flutter を呼べるよう PATH に追加
+          export PATH="${FLUTTER_ROOT_VAL}/bin:${PATH}"
+          export FLUTTER_ROOT="${FLUTTER_ROOT_VAL}"
 
           xcodebuild \
             -workspace ios/Runner.xcworkspace \
