@@ -51,6 +51,14 @@ workflows:
           cd app
           flutter pub get
 
+      - name: .envファイル生成とコード生成（envied build_runner）
+        script: |
+          cd app
+          # .env.template をベースに空の .env を生成（全フィールドオプションのためnullで問題なし）
+          cp .env.template .env
+          # envied が参照する _ProdEnv / _DevEnv クラスを生成
+          dart run build_runner build --delete-conflicting-outputs
+
       - name: CocoaPods インストール
         script: |
           cd app/ios
