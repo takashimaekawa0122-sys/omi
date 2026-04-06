@@ -44,7 +44,18 @@ class _FCMNotificationService implements NotificationInterface {
     await _initializeAwesomeNotifications();
     // Calling it here because the APNS token can sometimes arrive early or it might take some time (like a few seconds)
     // Reference: https://github.com/firebase/flutterfire/issues/12244#issuecomment-1969286794
-    await _firebaseMessaging.getAPNSToken();
+    // [A.I.S.A.] 5秒タイムアウトを追加: サイドロード（無料Apple ID）はAPNS権限なし→getAPNSToken()が永久ブロックするため
+    try {
+      await _firebaseMessaging.getAPNSToken().timeout(
+        const Duration(seconds: 5),
+        onTimeout: () {
+          Logger.debug('[AISA] getAPNSToken timed out (5s) — no push entitlement (sideloaded)');
+          return null;
+        },
+      );
+    } catch (e) {
+      Logger.debug('[AISA] getAPNSToken error: $e');
+    }
     listenForMessages();
   }
 
