@@ -32,7 +32,7 @@ workflows:
         script: |
           dart run build_runner build --delete-conflicting-outputs
 
-      - name: Generated.xcconfig 生成（pod install の前提条件）
+      - name: Flutter iOS 設定生成（Generated.xcconfig + symlinks）
         script: |
           flutter build ios \
             --config-only \
@@ -43,18 +43,37 @@ workflows:
         script: |
           cd ios && pod install --repo-update
 
-      - name: Flutter iOSビルド（署名なし・devフレーバー）
+      - name: Flutter パスを確認してから xcodebuild でビルド
         script: |
-          flutter build ios \
-            --release \
-            --no-codesign \
-            --flavor dev \
-            --no-pub
+          # Generated.xcconfig から FLUTTER_ROOT を取得
+          FLUTTER_ROOT_VAL=$(grep 'FLUTTER_ROOT=' ios/Flutter/Generated.xcconfig | head -1 | sed 's/FLUTTER_ROOT=//' | tr -d '\r\n')
+          FLUTTER_ENGINE="${FLUTTER_ROOT_VAL}/bin/cache/artifacts/engine/ios-release"
+
+          echo "=== Flutter Engine Path ==="
+          echo "$FLUTTER_ENGINE"
+          ls "$FLUTTER_ENGINE/" || echo "ERROR: engine path not found"
+          ls "$FLUTTER_ENGINE/Flutter.xcframework/" 2>/dev/null || echo "ERROR: Flutter.xcframework not found"
+
+          # Flutter.xcframework 内の arm64 スライスを探す
+          FLUTTER_ARM64=$(ls -d "$FLUTTER_ENGINE/Flutter.xcframework/ios-arm64" 2>/dev/null | head -1)
+          echo "Flutter arm64 slice: $FLUTTER_ARM64"
+
+          xcodebuild \
+            -workspace ios/Runner.xcworkspace \
+            -scheme dev \
+            -configuration Release-dev \
+            -sdk iphoneos \
+            -archivePath build/ios/archive/Runner.xcarchive \
+            FRAMEWORK_SEARCH_PATHS="\$(inherited) ${FLUTTER_ARM64}" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            archive
 
       - name: .ipa パッケージング
         script: |
           mkdir -p build/ios/ipa/Payload
-          cp -r build/ios/iphoneos/Runner.app build/ios/ipa/Payload/
+          cp -r "build/ios/archive/Runner.xcarchive/Products/Applications/Runner.app" build/ios/ipa/Payload/
           cd build/ios/ipa
           zip -r ../../Runner-unsigned.ipa Payload/
 
