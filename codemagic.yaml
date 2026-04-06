@@ -9,10 +9,9 @@
 # ビルド成果物:
 #   - 署名なし .ipa ファイル（Sideloadlyで注入）
 #
-# 環境変数（Codemagicダッシュボードで設定すること）:
-#   OPENAI_API_KEY       - Omiアプリ側で必要な場合
-#   SUPABASE_URL         - Omiアプリ側で必要な場合
-#   SUPABASE_ANON_KEY    - Omiアプリ側で必要な場合
+# Codemagicダッシュボード → Environment variables → aisa_secrets グループに設定すること:
+#   FIREBASE_OPTIONS_DEV  = firebase_options_dev.dart の内容をBase64エンコードした文字列
+#   FIREBASE_OPTIONS_PROD = firebase_options_prod.dart の内容をBase64エンコードした文字列
 #
 # フレーバーについて:
 #   Omiアプリは `dev` / `prod` の2フレーバー構成（Xcodeスキーム対応）
@@ -21,7 +20,7 @@
 workflows:
   aisa-ios-unsigned:
     name: "A.I.S.A. iOS (Unsigned IPA - dev flavor)"
-    max_build_duration: 60
+    max_build_duration: 90
 
     environment:
       flutter: stable
@@ -33,15 +32,6 @@ workflows:
     scripts:
       - name: Firebase設定ファイルを復元
         script: |
-          # Codemagicダッシュボードで設定した環境変数からファイルを復元する
-          # 設定方法: ダッシュボード → Environment variables に以下を登録（Secureにチェック）
-          #   FIREBASE_OPTIONS_DEV  = firebase_options_dev.dart の内容をBase64エンコードした文字列
-          #   FIREBASE_OPTIONS_PROD = firebase_options_prod.dart の内容をBase64エンコードした文字列
-          #
-          # Base64エンコード方法（macOS/Linux）:
-          #   base64 -i firebase_options_dev.dart | tr -d '\n'
-          # Base64エンコード方法（Windows PowerShell）:
-          #   [Convert]::ToBase64String([IO.File]::ReadAllBytes("firebase_options_dev.dart"))
           echo "$FIREBASE_OPTIONS_DEV"  | base64 --decode > app/lib/firebase_options_dev.dart
           echo "$FIREBASE_OPTIONS_PROD" | base64 --decode > app/lib/firebase_options_prod.dart
           echo "Firebase設定ファイルを復元しました"
@@ -51,13 +41,21 @@ workflows:
           cd app
           flutter pub get
 
-      - name: .envファイル生成とコード生成（envied build_runner）
+      - name: 環境変数ファイルと生成コードを準備（envied / build_runner）
         script: |
           cd app
-          # .env.template をベースに空の .env を生成（全フィールドオプションのためnullで問題なし）
+          # prod_env.dart は path: '.env'、dev_env.dart は path: '.dev.env' を参照する
+          # allowOptionalFields: true のため空ファイルで問題なし
           cp .env.template .env
-          # envied が参照する _ProdEnv / _DevEnv クラスを生成
+          cp .env.template .dev.env
+          # _ProdEnv / _DevEnv クラスと l10n / assets を一括生成
           dart run build_runner build --delete-conflicting-outputs
+
+      - name: GoogleService-Info.plist を ios/Runner/ に配置
+        script: |
+          # setup/prebuilt/ にある plist を Runner ターゲットに配置（Firebase 初期化に必要）
+          cp app/setup/prebuilt/GoogleService-Info.plist app/ios/Runner/GoogleService-Info.plist
+          echo "GoogleService-Info.plist を配置しました"
 
       - name: CocoaPods インストール
         script: |
@@ -74,7 +72,6 @@ workflows:
 
       - name: .ipa パッケージング（Payload形式）
         script: |
-          # フレーバー付きビルドでも Runner.app の出力先は同じ
           APP_PATH="$(find app/build/ios/iphoneos -name '*.app' | head -1)"
           if [ -z "$APP_PATH" ]; then
             echo "ERROR: .app が見つかりません"
