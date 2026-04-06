@@ -44,10 +44,13 @@ workflows:
       - name: 環境変数ファイルと生成コードを準備（envied / build_runner）
         script: |
           cd app
-          # prod_env.dart は path: '.env'、dev_env.dart は path: '.dev.env' を参照する
-          # allowOptionalFields: true のため空ファイルで問題なし
-          cp .env.template .env
-          cp .env.template .dev.env
+          # API_BASE_URL を公式Omiバックエンドに設定（空文字だとフォールバックが効かずフリーズする）
+          cat > .env << 'ENVEOF'
+          API_BASE_URL=https://api.omi.me/
+          ENVEOF
+          cat > .dev.env << 'ENVEOF'
+          API_BASE_URL=https://api.omi.me/
+          ENVEOF
           # _ProdEnv / _DevEnv クラスと l10n / assets を一括生成
           dart run build_runner build --delete-conflicting-outputs
 
