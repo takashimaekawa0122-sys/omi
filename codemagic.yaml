@@ -1,62 +1,90 @@
+# codemagic.yaml
+# A.I.S.A. L2 - Omi Fork iOS ビルド設定
+#
+# 前提:
+#   - このファイルをOmi ForkリポジトリのROOTに配置する（A.I.S.A.プロジェクトではない）
+#   - Codemagic (codemagic.io) でOmi ForkのGitHubリポジトリを登録する
+#   - 無料プラン: 500分/月（初回ビルドは依存解決で30〜40分かかる）
+#
+# ビルド成果物:
+#   - 署名なし .ipa ファイル（Sideloadlyで注入）
+#
+# 環境変数（Codemagicダッシュボードで設定すること）:
+#   OPENAI_API_KEY       - Omiアプリ側で必要な場合
+#   SUPABASE_URL         - Omiアプリ側で必要な場合
+#   SUPABASE_ANON_KEY    - Omiアプリ側で必要な場合
+#
+# フレーバーについて:
+#   Omiアプリは `dev` / `prod` の2フレーバー構成（Xcodeスキーム対応）
+#   本設定は `dev` フレーバーでビルドする
+
 workflows:
   aisa-ios-unsigned:
-    name: "A.I.S.A. iOS (Unsigned IPA)"
-    max_build_duration: 120
-    instance_type: mac_mini_m2
-    working_directory: app
+    name: "A.I.S.A. iOS (Unsigned IPA - dev flavor)"
+    max_build_duration: 60
 
     environment:
-      flutter: 3.35.3      # 公式Omiと同じバージョンに固定
-      xcode: 16.4          # 公式Omiと同じバージョンに固定
-      cocoapods: 1.16.2    # 公式Omiと同じバージョンに固定
-
-    cache:
-      cache_paths:
-        - $HOME/.pub-cache
-        - $HOME/Library/Caches/CocoaPods
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+      groups:
+        - aisa_secrets
 
     scripts:
-      - name: Opus インストール
+      - name: Firebase設定ファイルを復元
         script: |
-          brew install opus
-          brew install opus-tools
+          # Codemagicダッシュボードで設定した環境変数からファイルを復元する
+          # 設定方法: ダッシュボード → Environment variables に以下を登録（Secureにチェック）
+          #   FIREBASE_OPTIONS_DEV  = firebase_options_dev.dart の内容をBase64エンコードした文字列
+          #   FIREBASE_OPTIONS_PROD = firebase_options_prod.dart の内容をBase64エンコードした文字列
+          #
+          # Base64エンコード方法（macOS/Linux）:
+          #   base64 -i firebase_options_dev.dart | tr -d '\n'
+          # Base64エンコード方法（Windows PowerShell）:
+          #   [Convert]::ToBase64String([IO.File]::ReadAllBytes("firebase_options_dev.dart"))
+          echo "$FIREBASE_OPTIONS_DEV"  | base64 --decode > app/lib/firebase_options_dev.dart
+          echo "$FIREBASE_OPTIONS_PROD" | base64 --decode > app/lib/firebase_options_prod.dart
+          echo "Firebase設定ファイルを復元しました"
 
       - name: Flutter依存関係インストール
-        script: flutter pub get
-
-      - name: .dev.env 生成（build_runner の前提条件）
         script: |
-          cp .env.template .dev.env
-
-      - name: コード生成（build_runner）
-        script: |
-          dart run build_runner build --delete-conflicting-outputs
-
-      - name: Flutter iOS 設定生成（Generated.xcconfig + symlinks）
-        script: |
-          flutter build ios \
-            --config-only \
-            --no-codesign \
-            --flavor dev
+          cd app
+          flutter pub get
 
       - name: CocoaPods インストール
         script: |
-          cd ios && pod install --repo-update
+          cd app/ios
+          pod install --repo-update
 
-      - name: Flutter iOSビルド（署名なし・devフレーバー）
+      - name: Flutterビルド（unsigned・devフレーバー）
         script: |
+          cd app
           flutter build ios \
-            --release \
-            --no-codesign \
             --flavor dev \
-            --no-pub
+            --release \
+            --no-codesign
 
-      - name: .ipa パッケージング
+      - name: .ipa パッケージング（Payload形式）
         script: |
+          # フレーバー付きビルドでも Runner.app の出力先は同じ
+          APP_PATH="$(find app/build/ios/iphoneos -name '*.app' | head -1)"
+          if [ -z "$APP_PATH" ]; then
+            echo "ERROR: .app が見つかりません"
+            exit 1
+          fi
+          echo "パッケージング対象: $APP_PATH"
           mkdir -p build/ios/ipa/Payload
-          cp -r build/ios/iphoneos/Runner.app build/ios/ipa/Payload/
+          cp -r "$APP_PATH" build/ios/ipa/Payload/
           cd build/ios/ipa
-          zip -r ../../Runner-unsigned.ipa Payload/
+          zip -r ../Runner-unsigned.ipa Payload/
 
     artifacts:
-      - build/Runner-unsigned.ipa
+      - build/ios/Runner-unsigned.ipa
+
+    publishing:
+      email:
+        recipients:
+          - your-email@example.com  # ← ご自身のメールアドレスに変更
+        notify:
+          success: true
+          failure: true
