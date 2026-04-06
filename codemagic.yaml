@@ -19,12 +19,7 @@ workflows:
       - name: Flutter依存関係インストール
         script: flutter pub get
 
-      - name: CocoaPods インストール
-        script: |
-          cd ios
-          pod install --repo-update
-
-      - name: Flutter ビルド（署名なし・devフレーバー）
+      - name: Flutter iOSビルド（署名なし・devフレーバー）
         script: |
           flutter build ios \
             --release \
@@ -33,9 +28,9 @@ workflows:
 
       - name: .ipa パッケージング
         script: |
-          mkdir -p ../build/ios/ipa/Payload
-          cp -r build/ios/iphoneos/Runner.app ../build/ios/ipa/Payload/
-          cd ../build/ios/ipa
+          mkdir -p build/ios/ipa/Payload
+          cp -r build/ios/iphoneos/Runner.app build/ios/ipa/Payload/
+          cd build/ios/ipa
           zip -r ../../Runner-unsigned.ipa Payload/
 
     artifacts:
