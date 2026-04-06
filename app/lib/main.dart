@@ -80,6 +80,7 @@ import 'package:omi/utils/environment_detector.dart';
 import 'package:omi/pages/settings/developer.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
+import 'package:omi/services/aisa_firestore_service.dart';
 
 /// Background message handler for FCM data messages
 @pragma('vm:entry-point')
@@ -141,6 +142,9 @@ Future _init() async {
     // Firebase may already be initialized by native SDK (macOS)
     debugPrint('Firebase already initialized.');
   }
+
+  // A.I.S.A. Firestore初期化（失敗してもアプリは続行）
+  await AisaFirestoreService.instance.initialize();
 
   await PlatformManager.initializeServices();
   await NotificationService.instance.initialize();
