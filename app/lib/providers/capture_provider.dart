@@ -385,7 +385,7 @@ class CaptureProvider extends ChangeNotifier
       _sessionStartSeconds = DateTime.now().millisecondsSinceEpoch ~/ 1000;
       WidgetsBinding.instance.addObserver(this); // バックグラウンド検知を登録
     }
-    _aisaTimer ??= Timer.periodic(const Duration(seconds: 30), (_) {
+    _aisaTimer ??= Timer.periodic(const Duration(seconds: 5), (_) {
       _triggerAisaTranscription();
     });
     notifyListeners();
