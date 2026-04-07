@@ -93,25 +93,38 @@ class AuthenticationProvider extends BaseProvider {
         } else {
           credential = await AuthService.instance.authenticateWithProvider('google');
         }
-        // credentialのuserを直接確認（currentUserの遅延更新を回避）
         final signedInUser = credential?.user ?? _auth.currentUser;
         final isGoogleSignedIn = signedInUser != null && !signedInUser.isAnonymous;
         if (credential != null && isGoogleSignedIn) {
           _signIn(onSignIn);
         } else {
-          Logger.debug('Google sign in failed: credential=${credential?.user?.uid}, isAnonymous=${signedInUser?.isAnonymous}, currentUser=${_auth.currentUser?.uid}');
-          AppSnackbar.showSnackbarError(
-            globalNavigatorKey.currentContext?.l10n.authFailedToSignInWithGoogle ??
-                'Failed to sign in with Google, please try again.',
-          );
+          final msg = 'cred=${credential == null ? "NULL" : "uid=${credential.user?.uid ?? "null"} anon=${credential.user?.isAnonymous}"}'
+              '\ncurrentUser=${_auth.currentUser?.uid} anon=${_auth.currentUser?.isAnonymous}';
+          Logger.debug('Google sign in failed: $msg');
+          if (globalNavigatorKey.currentContext != null) {
+            showDialog(
+              context: globalNavigatorKey.currentContext!,
+              builder: (_) => AlertDialog(
+                title: const Text('DEBUG: Sign-In Failed'),
+                content: Text(msg),
+                actions: [TextButton(onPressed: () => Navigator.pop(globalNavigatorKey.currentContext!), child: const Text('OK'))],
+              ),
+            );
+          }
         }
       } catch (e, stackTrace) {
         print('DEBUG_AUTH: OAuth Google sign in error: $e');
-        print('DEBUG_AUTH: Stack trace: $stackTrace');
         Logger.debug('OAuth Google sign in error: $e');
-        AppSnackbar.showSnackbarError(
-          globalNavigatorKey.currentContext?.l10n.authenticationFailed ?? 'Authentication failed. Please try again.',
-        );
+        if (globalNavigatorKey.currentContext != null) {
+          showDialog(
+            context: globalNavigatorKey.currentContext!,
+            builder: (_) => AlertDialog(
+              title: const Text('DEBUG: Exception'),
+              content: Text(e.toString()),
+              actions: [TextButton(onPressed: () => Navigator.pop(globalNavigatorKey.currentContext!), child: const Text('OK'))],
+            ),
+          );
+        }
       }
       setLoadingState(false);
     }
