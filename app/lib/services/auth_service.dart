@@ -180,6 +180,21 @@ class AuthService {
         _clearCachedAuth();
         return null;
       }
+      // force refresh(true)はサインイン直後に失敗することがあるため、まずキャッシュ済みトークンを試みる
+      String? cachedToken = await FirebaseAuth.instance.currentUser?.getIdToken(false);
+      if (cachedToken != null && cachedToken.isNotEmpty) {
+        var user = FirebaseAuth.instance.currentUser!;
+        SharedPreferencesUtil().uid = user.uid;
+        SharedPreferencesUtil().authToken = cachedToken;
+        if (SharedPreferencesUtil().email.isEmpty) {
+          SharedPreferencesUtil().email = user.email ?? '';
+        }
+        if (SharedPreferencesUtil().givenName.isEmpty) {
+          SharedPreferencesUtil().givenName = user.displayName?.split(' ')[0] ?? '';
+        }
+        Logger.debug('getIdToken: using cached token successfully');
+        return cachedToken;
+      }
       IdTokenResult? newToken = await FirebaseAuth.instance.currentUser?.getIdTokenResult(true);
       if (newToken?.token != null) {
         var user = FirebaseAuth.instance.currentUser!;
