@@ -66,7 +66,7 @@ import 'package:omi/backend/schema/message_event.dart'
 
 class CaptureProvider extends ChangeNotifier
     with MessageNotifierMixin
-    implements ITransctiptSegmentSocketServiceListener {
+    implements ITransctiptSegmentSocketServiceListener, WidgetsBindingObserver {
   ConversationProvider? conversationProvider;
   MessageProvider? messageProvider;
   PeopleProvider? peopleProvider;
@@ -383,8 +383,9 @@ class CaptureProvider extends ChangeNotifier
     _transcriptServiceReady = true;
     if (_sessionStartSeconds == 0) {
       _sessionStartSeconds = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      WidgetsBinding.instance.addObserver(this); // バックグラウンド検知を登録
     }
-    _aisaTimer ??= Timer.periodic(const Duration(seconds: 60), (_) {
+    _aisaTimer ??= Timer.periodic(const Duration(seconds: 30), (_) {
       _triggerAisaTranscription();
     });
     notifyListeners();
@@ -903,8 +904,18 @@ class CaptureProvider extends ChangeNotifier
     notifyListeners();
   }
 
+  // AISA: バックグラウンド移行時に音声を即送信
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused || state == AppLifecycleState.detached) {
+      _triggerAisaTranscription();
+    }
+  }
+
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _triggerAisaTranscription(); // 残った音声を送信してから破棄
     _bleBytesStream?.cancel();
     _blePhotoStream?.cancel();
     _socket?.unsubscribe(this);
