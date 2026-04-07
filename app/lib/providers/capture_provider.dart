@@ -378,6 +378,18 @@ class CaptureProvider extends ChangeNotifier
   }) async {
     Logger.debug('initiateWebsocket in capture_provider');
 
+    // AISA: api.omi.me はaisa-5c0bdのトークンを拒否するためWebSocket接続をスキップ
+    // keepAliveループも起動せず「再接続中」UIを表示しない
+    _transcriptServiceReady = true;
+    if (_sessionStartSeconds == 0) {
+      _sessionStartSeconds = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    }
+    _aisaTimer ??= Timer.periodic(const Duration(seconds: 60), (_) {
+      _triggerAisaTranscription();
+    });
+    notifyListeners();
+    return;
+
     BleAudioCodec codec = audioCodec;
     sampleRate ??= mapCodecToSampleRate(codec);
     channels ??= (codec == BleAudioCodec.pcm16 || codec == BleAudioCodec.pcm8) ? 1 : 2;
