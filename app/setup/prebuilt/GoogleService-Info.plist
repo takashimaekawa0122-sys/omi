@@ -3,23 +3,21 @@
 <plist version="1.0">
 <dict>
 	<key>CLIENT_ID</key>
-	<string>1031333818730-dusn243nct6i5rgfpfkj5mchuj1qnmde.apps.googleusercontent.com</string>
+	<string>587569678804-i5dot7a3rn6ulsfm1vlnm704832rfd7s.apps.googleusercontent.com</string>
 	<key>REVERSED_CLIENT_ID</key>
-	<string>com.googleusercontent.apps.1031333818730-dusn243nct6i5rgfpfkj5mchuj1qnmde</string>
-	<key>ANDROID_CLIENT_ID</key>
-	<string>1031333818730-1cgqp3jc5p8n2rk467pl4t56qc4lnnbr.apps.googleusercontent.com</string>
+	<string>com.googleusercontent.apps.587569678804-i5dot7a3rn6ulsfm1vlnm704832rfd7s</string>
 	<key>API_KEY</key>
-	<string>AIzaSyBK-G7KmEoC72mR10gmQyb2NFBbZyDvcqM</string>
+	<string>AIzaSyCDMXPc798PXd2Q7V0zC3NfcG-95BXR3vY</string>
 	<key>GCM_SENDER_ID</key>
-	<string>1031333818730</string>
+	<string>587569678804</string>
 	<key>PLIST_VERSION</key>
 	<string>1</string>
 	<key>BUNDLE_ID</key>
-	<string>com.friend-app-with-wearable.ios12.development</string>
+	<string>com.friend-app-with-wearable.ios12</string>
 	<key>PROJECT_ID</key>
-	<string>based-hardware-dev</string>
+	<string>aisa-5c0bd</string>
 	<key>STORAGE_BUCKET</key>
-	<string>based-hardware-dev.firebasestorage.app</string>
+	<string>aisa-5c0bd.firebasestorage.app</string>
 	<key>IS_ADS_ENABLED</key>
 	<false></false>
 	<key>IS_ANALYTICS_ENABLED</key>
@@ -31,6 +29,6 @@
 	<key>IS_SIGNIN_ENABLED</key>
 	<true></true>
 	<key>GOOGLE_APP_ID</key>
-	<string>1:1031333818730:ios:3bea63d8e4f41dbfafb513</string>
+	<string>1:587569678804:ios:2aa2aff62c2dd2baccee41</string>
 </dict>
 </plist>
