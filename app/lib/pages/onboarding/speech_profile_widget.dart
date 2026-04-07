@@ -138,19 +138,10 @@ class _SpeechProfileWidgetState extends State<SpeechProfileWidget> with TickerPr
             },
             showError: (error) {
               if (error == 'SOCKET_INIT_FAILED') {
-                showDialog(
-                  context: context,
-                  builder: (c) => getDialog(
-                    context,
-                    () => Navigator.pop(context),
-                    () {},
-                    context.l10n.connectionError,
-                    context.l10n.connectionErrorDesc,
-                    okButtonText: context.l10n.ok,
-                    singleButton: true,
-                  ),
-                  barrierDismissible: false,
-                );
+                // Speech profile server unavailable (expected for custom Firebase projects).
+                // Auto-skip so onboarding can continue.
+                widget.onSkip();
+                return;
               } else if (error == 'MULTIPLE_SPEAKERS') {
                 showDialog(
                   context: context,
@@ -186,21 +177,10 @@ class _SpeechProfileWidgetState extends State<SpeechProfileWidget> with TickerPr
                   barrierDismissible: false,
                 );
               } else if (error == 'UPLOAD_FAILED') {
-                showDialog(
-                  context: context,
-                  builder: (c) => getDialog(
-                    context,
-                    () {
-                      Navigator.pop(context);
-                    },
-                    () {},
-                    context.l10n.connectionError,
-                    context.l10n.connectionErrorDesc,
-                    okButtonText: context.l10n.ok,
-                    singleButton: true,
-                  ),
-                  barrierDismissible: false,
-                );
+                // Upload to server failed (expected for custom Firebase projects).
+                // Auto-skip so onboarding can continue.
+                widget.onSkip();
+                return;
               } else if (error == 'INVALID_RECORDING') {
                 showDialog(
                   context: context,
