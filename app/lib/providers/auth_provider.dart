@@ -93,9 +93,13 @@ class AuthenticationProvider extends BaseProvider {
         } else {
           credential = await AuthService.instance.authenticateWithProvider('google');
         }
-        if (credential != null && isSignedIn()) {
+        // credentialのuserを直接確認（currentUserの遅延更新を回避）
+        final signedInUser = credential?.user ?? _auth.currentUser;
+        final isGoogleSignedIn = signedInUser != null && !signedInUser.isAnonymous;
+        if (credential != null && isGoogleSignedIn) {
           _signIn(onSignIn);
         } else {
+          Logger.debug('Google sign in failed: credential=${credential?.user?.uid}, isAnonymous=${signedInUser?.isAnonymous}, currentUser=${_auth.currentUser?.uid}');
           AppSnackbar.showSnackbarError(
             globalNavigatorKey.currentContext?.l10n.authFailedToSignInWithGoogle ??
                 'Failed to sign in with Google, please try again.',
