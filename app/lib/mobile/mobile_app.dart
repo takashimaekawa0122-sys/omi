@@ -58,7 +58,16 @@ class _PermissionsGateState extends State<_PermissionsGate> {
   }
 
   Future<void> _check() async {
-    final granted = await arePermissionsGranted();
+    // [A.I.S.A.] 5秒タイムアウト: permission_handler がハングした場合にスピナーが永久に出るのを防ぐ
+    bool granted = false;
+    try {
+      granted = await arePermissionsGranted().timeout(
+        const Duration(seconds: 5),
+        onTimeout: () => false,
+      );
+    } catch (e) {
+      granted = false;
+    }
     if (granted) {
       SharedPreferencesUtil().permissionsCompleted = true;
     }
