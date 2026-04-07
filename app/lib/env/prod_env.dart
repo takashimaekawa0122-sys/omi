@@ -59,4 +59,8 @@ final class ProdEnv implements EnvFields {
   @override
   @EnviedField(varName: 'STAGING_API_URL', obfuscate: true)
   final String? stagingApiUrl = _ProdEnv.stagingApiUrl;
+
+  @override
+  @EnviedField(varName: 'AVALON_API_KEY', obfuscate: true)
+  final String? avalonApiKey = _ProdEnv.avalonApiKey;
 }

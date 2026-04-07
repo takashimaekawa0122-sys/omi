@@ -15,6 +15,8 @@ import 'package:permission_handler/permission_handler.dart';
 
 import 'package:omi/backend/http/api/conversations.dart';
 import 'package:omi/services/aisa_firestore_service.dart';
+import 'package:omi/services/aisa_transcription_service.dart';
+import 'package:omi/utils/audio/wav_bytes.dart';
 import 'package:omi/backend/http/api/users.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/services/auth_service.dart';
@@ -77,6 +79,7 @@ class CaptureProvider extends ChangeNotifier
   TranscriptSegmentSocketService? _socket;
   Timer? _keepAliveTimer;
   DateTime? _keepAliveLastExecutedAt;
+  Timer? _aisaTimer;
 
   IWalService get _wal => ServiceManager.instance().wal;
 
@@ -112,6 +115,10 @@ class CaptureProvider extends ChangeNotifier
 
   // Phone mic WAL: buffer for splitting variable-sized PCM chunks into fixed-size frames
   bool _phoneMicWalActive = false;
+
+  // AISA: フレームバッファ（会話終了時に Avalon API へ送信）
+  final List<List<int>> _aisaFrameBuffer = [];
+  BleAudioCodec _aisaCodec = BleAudioCodec.pcm16;
 
   bool _isLoadingInProgressConversation = false;
 
@@ -310,6 +317,7 @@ class CaptureProvider extends ChangeNotifier
     _conversation = null;
     taggingSegmentIds = [];
     _sessionStartSeconds = 0;
+    _aisaFrameBuffer.clear();
     notifyListeners();
   }
 
@@ -404,6 +412,11 @@ class CaptureProvider extends ChangeNotifier
     if (_socket == null) {
       _startKeepAliveServices();
       Logger.debug("Can not create new conversation socket");
+      // AISA: ソケット未接続でもタイマーを起動して音声処理を継続
+      _aisaTimer?.cancel();
+      _aisaTimer = Timer.periodic(const Duration(seconds: 60), (_) {
+        _triggerAisaTranscription();
+      });
       return;
     }
     _socket?.subscribe(this, this);
@@ -411,6 +424,12 @@ class CaptureProvider extends ChangeNotifier
     if (_sessionStartSeconds == 0) {
       _sessionStartSeconds = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     }
+
+    // AISA: WebSocketに依存しない定期文字起こしタイマー（60秒ごと）
+    _aisaTimer?.cancel();
+    _aisaTimer = Timer.periodic(const Duration(seconds: 60), (_) {
+      _triggerAisaTranscription();
+    });
 
     _loadInProgressConversation();
 
@@ -613,6 +632,12 @@ class CaptureProvider extends ChangeNotifier
             _wal.getSyncs().phone.onFrameCaptured(frame);
           }
         }
+
+        // AISA: フレームをバッファに蓄積
+        for (final frame in frames) {
+          _aisaFrameBuffer.add(frame.payload);
+        }
+        _aisaCodec = codec;
 
         // Send WS
         if (_socket?.state == SocketServiceState.connected) {
@@ -874,6 +899,7 @@ class CaptureProvider extends ChangeNotifier
     _blePhotoStream?.cancel();
     _socket?.unsubscribe(this);
     _keepAliveTimer?.cancel();
+    _aisaTimer?.cancel();
     _connectionStateListener?.cancel();
     _metricsTimer?.cancel();
     _peopleRefreshFuture = null; // Clear in-flight tracker
@@ -945,7 +971,11 @@ class CaptureProvider extends ChangeNotifier
             _socket?.send(frame.payload);
             _wal.getSyncs().phone.markFrameSynced(frame.syncKey);
           }
+
+          // AISA: フレームをバッファに蓄積
+          _aisaFrameBuffer.add(frame.payload);
         }
+        _aisaCodec = BleAudioCodec.pcm16;
       },
       onRecording: () {
         updateRecordingState(RecordingState.record);
@@ -1204,6 +1234,7 @@ class CaptureProvider extends ChangeNotifier
 
   Future<void> forceProcessingCurrentConversation() async {
     final sessionStart = _sessionStartSeconds;
+    _triggerAisaTranscription(); // fire-and-forget（_resetStateVariables より前に呼んでバッファを保全）
     _resetStateVariables();
     conversationProvider!.addProcessingConversation(
       ServerConversation(
@@ -1229,6 +1260,20 @@ class CaptureProvider extends ChangeNotifier
     });
 
     return;
+  }
+
+  Future<void> _triggerAisaTranscription() async {
+    if (_aisaFrameBuffer.isEmpty) return;
+    final frames = List<List<int>>.from(_aisaFrameBuffer);
+    _aisaFrameBuffer.clear();
+    try {
+      final wavUtil = WavBytesUtil(codec: _aisaCodec, framesPerSecond: _aisaCodec.getFramesPerSecond());
+      final wavFile = await wavUtil.createWavByCodec(frames,
+          filename: 'aisa_${DateTime.now().millisecondsSinceEpoch}.wav');
+      await AisaTranscriptionService.instance.processAndSave(wavFile);
+    } catch (e) {
+      Logger.debug('[AISA] 音声処理失敗: $e');
+    }
   }
 
   Future<void> _autoSyncSessionWals(int sessionStartSeconds, String conversationId) async {

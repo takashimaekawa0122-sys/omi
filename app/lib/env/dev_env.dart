@@ -59,4 +59,8 @@ final class DevEnv implements EnvFields {
   @override
   @EnviedField(varName: 'STAGING_API_URL', obfuscate: true)
   final String? stagingApiUrl = _DevEnv.stagingApiUrl;
+
+  @override
+  @EnviedField(varName: 'AVALON_API_KEY', obfuscate: true)
+  final String? avalonApiKey = _DevEnv.avalonApiKey;
 }

@@ -77,4 +77,28 @@ class AisaFirestoreService {
       rethrow;
     }
   }
+
+  Future<void> saveTranscript(String transcript) async {
+    if (!_initialized || _firestore == null) return;
+    if (transcript.trim().isEmpty) return;
+
+    final now = DateTime.now();
+    final dateStr =
+        '${now.year.toString().padLeft(4, '0')}-'
+        '${now.month.toString().padLeft(2, '0')}-'
+        '${now.day.toString().padLeft(2, '0')}';
+
+    await _firestore!
+        .collection('sessions')
+        .doc(dateStr)
+        .collection('entries')
+        .add({
+      'text': transcript,
+      'timestampMs': now.millisecondsSinceEpoch,
+      'deleted': false,
+      'source': 'avalon',
+    });
+
+    debugPrint('[AISA] Avalon文字起こし保存成功: $dateStr');
+  }
 }
