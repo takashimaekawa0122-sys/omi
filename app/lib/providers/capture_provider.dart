@@ -1291,10 +1291,32 @@ class CaptureProvider extends ChangeNotifier
       final wavUtil = WavBytesUtil(codec: _aisaCodec, framesPerSecond: _aisaCodec.getFramesPerSecond());
       final wavFile = await wavUtil.createWavByCodec(frames,
           filename: 'aisa_${DateTime.now().millisecondsSinceEpoch}.wav');
-      await AisaTranscriptionService.instance.processAndSave(wavFile);
+      final transcript = await AisaTranscriptionService.instance.processAndSave(wavFile);
+      if (transcript != null && transcript.trim().isNotEmpty) {
+        _addAisaConversation(transcript);
+      }
     } catch (e) {
       Logger.debug('[AISA] 音声処理失敗: $e');
     }
+  }
+
+  void _addAisaConversation(String transcript) {
+    if (conversationProvider == null) return;
+    final now = DateTime.now();
+    final conversation = ServerConversation(
+      id: 'aisa_${now.millisecondsSinceEpoch}',
+      createdAt: now,
+      structured: Structured(
+        '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')} の会話',
+        transcript,
+        emoji: '🎙️',
+      ),
+      transcriptSegments: [],
+      source: ConversationSource.phone,
+      status: ConversationStatus.completed,
+    );
+    conversationProvider!.upsertConversation(conversation);
+    Logger.debug('[AISA] 会話を追加: $transcript');
   }
 
   Future<void> _autoSyncSessionWals(int sessionStartSeconds, String conversationId) async {

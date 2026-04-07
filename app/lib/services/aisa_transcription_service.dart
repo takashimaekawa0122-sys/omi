@@ -18,20 +18,25 @@ class AisaTranscriptionService {
 
   static const _endpoint = 'https://api.aqua.sh/v1/audio/transcriptions';
 
-  Future<void> processAndSave(File wavFile) async {
+  /// 音声ファイルを文字起こししてFirestoreに保存し、テキストを返す
+  Future<String?> processAndSave(File wavFile) async {
     try {
       final apiKey = Env.avalonApiKey;
       if (apiKey == null || apiKey.isEmpty) {
         debugPrint('[AISA] AVALON_API_KEY が未設定のためスキップ');
-        return;
+        return null;
       }
 
       final transcript = await _transcribe(wavFile, apiKey);
       if (transcript != null && transcript.trim().isNotEmpty) {
         await AisaFirestoreService.instance.saveTranscript(transcript);
+        debugPrint('[AISA] 文字起こし成功: $transcript');
+        return transcript;
       }
+      return null;
     } catch (e) {
       debugPrint('[AISA] 文字起こし処理失敗: $e');
+      return null;
     } finally {
       try {
         if (await wavFile.exists()) {
