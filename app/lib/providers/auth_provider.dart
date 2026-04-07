@@ -96,35 +96,42 @@ class AuthenticationProvider extends BaseProvider {
         final signedInUser = credential?.user ?? _auth.currentUser;
         final isGoogleSignedIn = signedInUser != null && !signedInUser.isAnonymous;
         if (credential != null && isGoogleSignedIn) {
-          _signIn(onSignIn);
-        } else {
-          final msg = 'cred=${credential == null ? "NULL" : "uid=${credential.user?.uid ?? "null"} anon=${credential.user?.isAnonymous}"}'
-              '\ncurrentUser=${_auth.currentUser?.uid} anon=${_auth.currentUser?.isAnonymous}';
-          Logger.debug('Google sign in failed: $msg');
-          if (globalNavigatorKey.currentContext != null) {
-            showDialog(
-              context: globalNavigatorKey.currentContext!,
-              builder: (_) => AlertDialog(
-                title: const Text('DEBUG: Sign-In Failed'),
-                content: Text(msg),
-                actions: [TextButton(onPressed: () => Navigator.pop(globalNavigatorKey.currentContext!), child: const Text('OK'))],
-              ),
-            );
+          // _signIn()を経由せず、credentialから直接トークンを取得してサインイン完了
+          final user = signedInUser;
+          try {
+            final token = await user.getIdToken();
+            SharedPreferencesUtil().uid = user.uid;
+            if (token != null && token.isNotEmpty) {
+              SharedPreferencesUtil().authToken = token;
+            }
+            SharedPreferencesUtil().email = user.email ?? '';
+            final displayName = user.displayName ?? '';
+            if (displayName.isNotEmpty) {
+              final parts = displayName.split(' ');
+              SharedPreferencesUtil().givenName = parts[0];
+              SharedPreferencesUtil().familyName = parts.length > 1 ? parts.sublist(1).join(' ') : '';
+            }
+            NotificationService.instance.saveNotificationToken();
+            MixpanelManager().identify();
+            onSignIn();
+          } catch (e) {
+            Logger.debug('Token fetch after Google sign-in failed: $e — proceeding anyway');
+            SharedPreferencesUtil().uid = user.uid;
+            MixpanelManager().identify();
+            onSignIn();
           }
+        } else {
+          AppSnackbar.showSnackbarError(
+            globalNavigatorKey.currentContext?.l10n.authFailedToSignInWithGoogle ??
+                'Failed to sign in with Google, please try again.',
+          );
         }
       } catch (e, stackTrace) {
         print('DEBUG_AUTH: OAuth Google sign in error: $e');
         Logger.debug('OAuth Google sign in error: $e');
-        if (globalNavigatorKey.currentContext != null) {
-          showDialog(
-            context: globalNavigatorKey.currentContext!,
-            builder: (_) => AlertDialog(
-              title: const Text('DEBUG: Exception'),
-              content: Text(e.toString()),
-              actions: [TextButton(onPressed: () => Navigator.pop(globalNavigatorKey.currentContext!), child: const Text('OK'))],
-            ),
-          );
-        }
+        AppSnackbar.showSnackbarError(
+          globalNavigatorKey.currentContext?.l10n.authenticationFailed ?? 'Authentication failed. Please try again.',
+        );
       }
       setLoadingState(false);
     }
