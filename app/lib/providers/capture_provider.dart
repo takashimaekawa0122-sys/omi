@@ -412,9 +412,8 @@ class CaptureProvider extends ChangeNotifier
     if (_socket == null) {
       _startKeepAliveServices();
       Logger.debug("Can not create new conversation socket");
-      // AISA: ソケット未接続でもタイマーを起動して音声処理を継続
-      _aisaTimer?.cancel();
-      _aisaTimer = Timer.periodic(const Duration(seconds: 60), (_) {
+      // AISA: 未起動のときだけ開始（keepAliveに毎回リセットされないよう??=を使う）
+      _aisaTimer ??= Timer.periodic(const Duration(seconds: 60), (_) {
         _triggerAisaTranscription();
       });
       return;
@@ -425,9 +424,8 @@ class CaptureProvider extends ChangeNotifier
       _sessionStartSeconds = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     }
 
-    // AISA: WebSocketに依存しない定期文字起こしタイマー（60秒ごと）
-    _aisaTimer?.cancel();
-    _aisaTimer = Timer.periodic(const Duration(seconds: 60), (_) {
+    // AISA: 未起動のときだけ開始（keepAliveに毎回リセットされないよう??=を使う）
+    _aisaTimer ??= Timer.periodic(const Duration(seconds: 60), (_) {
       _triggerAisaTranscription();
     });
 
