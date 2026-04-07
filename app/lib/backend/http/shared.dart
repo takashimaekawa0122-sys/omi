@@ -129,20 +129,10 @@ Future<http.Response?> makeApiCall({
         );
         Logger.log('Token refreshed and request retried');
         if (response.statusCode == 401) {
-          await AuthService.instance.signOut();
-          Logger.handle(
-            Exception('Authentication failed. Please sign in again.'),
-            StackTrace.current,
-            message: 'Authentication failed. Please sign in again.',
-          );
+          Logger.log('Authentication failed after token refresh (401). Backend may not accept this Firebase project token.');
         }
       } else {
-        await AuthService.instance.signOut();
-        Logger.handle(
-          Exception('Authentication failed. Please sign in again.'),
-          StackTrace.current,
-          message: 'Authentication failed. Please sign in again.',
-        );
+        Logger.log('Authentication failed: no valid token available.');
       }
     }
 

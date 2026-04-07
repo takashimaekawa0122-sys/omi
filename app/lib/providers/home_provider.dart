@@ -223,27 +223,27 @@ class HomeProvider extends ChangeNotifier {
   }
 
   Future<bool> updateUserPrimaryLanguage(String languageCode, {UserProvider? userProvider}) async {
+    // Save locally first so onboarding always succeeds regardless of backend availability
+    userPrimaryLanguage = languageCode;
+    hasSetPrimaryLanguage = true;
+    SharedPreferencesUtil().userPrimaryLanguage = languageCode;
+    SharedPreferencesUtil().hasSetPrimaryLanguage = true;
+    AnalyticsManager().setUserAttribute('Primary Language', languageCode);
+
+    // Backend auto-sets single_language_mode — sync local state to match
+    final singleLanguageMode = !multiLanguageSupported.contains(languageCode);
+    userProvider?.updateSingleLanguageModeLocally(singleLanguageMode);
+
+    notifyListeners();
+
+    // Best-effort sync to backend (non-fatal if it fails)
     try {
-      final success = await setUserPrimaryLanguage(languageCode);
-      if (success) {
-        userPrimaryLanguage = languageCode;
-        hasSetPrimaryLanguage = true;
-        SharedPreferencesUtil().userPrimaryLanguage = languageCode;
-        SharedPreferencesUtil().hasSetPrimaryLanguage = true;
-        AnalyticsManager().setUserAttribute('Primary Language', languageCode);
-
-        // Backend auto-sets single_language_mode — sync local state to match
-        final singleLanguageMode = !multiLanguageSupported.contains(languageCode);
-        userProvider?.updateSingleLanguageModeLocally(singleLanguageMode);
-
-        notifyListeners();
-        return true;
-      }
-      return false;
+      await setUserPrimaryLanguage(languageCode);
     } catch (e) {
-      Logger.debug('Error setting user primary language: $e');
-      return false;
+      Logger.debug('Error syncing language to backend (non-fatal): $e');
     }
+
+    return true;
   }
 
   String getLanguageName(String code) {
