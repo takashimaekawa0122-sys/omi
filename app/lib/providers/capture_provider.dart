@@ -65,8 +65,8 @@ import 'package:omi/backend/schema/message_event.dart'
         SegmentsDeletedEvent;
 
 class CaptureProvider extends ChangeNotifier
-    with MessageNotifierMixin
-    implements ITransctiptSegmentSocketServiceListener, WidgetsBindingObserver {
+    with MessageNotifierMixin, WidgetsBindingObserver
+    implements ITransctiptSegmentSocketServiceListener {
   ConversationProvider? conversationProvider;
   MessageProvider? messageProvider;
   PeopleProvider? peopleProvider;
