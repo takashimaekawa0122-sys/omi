@@ -120,47 +120,92 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
 }
 
 Future _init() async {
-  // Env
+  // [A.I.S.A.] 起動ステップログ: どのステップで止まるか特定するため
+  void step(String name) => debugPrint('[AISA-INIT] >>> $name');
+
+  step('1: Env.init');
   if (F.env == Environment.prod) {
     Env.init(ProdEnv());
   } else {
     Env.init(DevEnv());
   }
 
+  step('2: FlutterForegroundTask.initCommunicationPort');
   FlutterForegroundTask.initCommunicationPort();
 
-  // Service manager
-  await ServiceManager.init();
-
-  // Firebase
-  if (Firebase.apps.isEmpty) {
-    final options = F.env == Environment.prod
-        ? prod.DefaultFirebaseOptions.currentPlatform
-        : dev.DefaultFirebaseOptions.currentPlatform;
-    await Firebase.initializeApp(options: options);
-  } else {
-    // Firebase may already be initialized by native SDK (macOS)
-    debugPrint('Firebase already initialized.');
+  step('3: ServiceManager.init START');
+  try {
+    await ServiceManager.init().timeout(
+      const Duration(seconds: 10),
+      onTimeout: () => debugPrint('[AISA] ServiceManager.init timed out (10s)'),
+    );
+  } catch (e) {
+    debugPrint('[AISA] ServiceManager.init error: $e');
   }
+  step('3: ServiceManager.init DONE');
 
-  // A.I.S.A. Firestore初期化（失敗してもアプリは続行）
-  // [A.I.S.A.] 10秒タイムアウト: signInAnonymously()のネットワーク待ちでブロックしないよう保護
-  await AisaFirestoreService.instance.initialize().timeout(
-    const Duration(seconds: 10),
-    onTimeout: () => debugPrint('[AISA] Firestore初期化タイムアウト（10s）— スキップして続行'),
-  );
+  step('4: Firebase.initializeApp START');
+  try {
+    if (Firebase.apps.isEmpty) {
+      final options = F.env == Environment.prod
+          ? prod.DefaultFirebaseOptions.currentPlatform
+          : dev.DefaultFirebaseOptions.currentPlatform;
+      await Firebase.initializeApp(options: options).timeout(
+        const Duration(seconds: 15),
+        onTimeout: () => throw TimeoutException('Firebase.initializeApp', const Duration(seconds: 15)),
+      );
+    } else {
+      debugPrint('Firebase already initialized.');
+    }
+  } catch (e) {
+    debugPrint('[AISA] Firebase.initializeApp error/timeout: $e');
+  }
+  step('4: Firebase.initializeApp DONE');
 
-  await PlatformManager.initializeServices();
-  await NotificationService.instance.initialize();
+  step('5: AisaFirestoreService.initialize START');
+  try {
+    await AisaFirestoreService.instance.initialize().timeout(
+      const Duration(seconds: 10),
+      onTimeout: () => debugPrint('[AISA] Firestore初期化タイムアウト（10s）— スキップして続行'),
+    );
+  } catch (e) {
+    debugPrint('[AISA] AisaFirestoreService error: $e');
+  }
+  step('5: AisaFirestoreService.initialize DONE');
+
+  step('6: PlatformManager.initializeServices START');
+  try {
+    await PlatformManager.initializeServices().timeout(
+      const Duration(seconds: 10),
+      onTimeout: () => debugPrint('[AISA] PlatformManager.initializeServices timed out (10s)'),
+    );
+  } catch (e) {
+    debugPrint('[AISA] PlatformManager.initializeServices error: $e');
+  }
+  step('6: PlatformManager.initializeServices DONE');
+
+  step('7: NotificationService.initialize START');
+  try {
+    await NotificationService.instance.initialize().timeout(
+      const Duration(seconds: 15),
+      onTimeout: () => debugPrint('[AISA] NotificationService.initialize timed out (15s)'),
+    );
+  } catch (e) {
+    debugPrint('[AISA] NotificationService.initialize error: $e');
+  }
+  step('7: NotificationService.initialize DONE');
 
   // Register FCM background message handler
   if (PlatformManager().isFCMSupported) {
     FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
   }
 
+  step('8: SharedPreferencesUtil.init START');
   await SharedPreferencesUtil.init();
+  step('8: SharedPreferencesUtil.init DONE');
 
   // TestFlight environment detection — must be after SharedPreferencesUtil.init()
+  // devフレーバーなのでこのブロックは実行されない
   if (F.env == Environment.prod) {
     final isTestFlight = await EnvironmentDetector.isTestFlight();
     if (isTestFlight) {
@@ -179,8 +224,7 @@ Future _init() async {
     }
   }
 
-  // [A.I.S.A.] 10秒タイムアウト: トークンリフレッシュのネットワーク待ちでブロックしないよう保護
-  print('DEBUG main: Before getIdToken - currentUser=${FirebaseAuth.instance.currentUser?.uid}');
+  step('9: getIdToken START');
   String? idToken;
   try {
     idToken = await AuthService.instance.getIdToken().timeout(
@@ -194,24 +238,45 @@ Future _init() async {
     debugPrint('[AISA] getIdToken error: $e');
   }
   bool isAuth = idToken != null;
-  print('DEBUG main: After getIdToken - isAuth=$isAuth, currentUser=${FirebaseAuth.instance.currentUser?.uid}');
+  step('9: getIdToken DONE isAuth=$isAuth');
+
   if (isAuth) {
     PlatformManager.instance.mixpanel.identify();
-    // Restore onboarding state from server if not already set locally
-    // This handles the case where cached credentials are used on startup
     if (!SharedPreferencesUtil().onboardingCompleted) {
-      print('DEBUG main: Restoring onboarding state from server...');
-      // [A.I.S.A.] 10秒タイムアウト: APIハングでブロックしないよう保護
-      await AuthService.instance.restoreOnboardingState().timeout(
-        const Duration(seconds: 10),
-        onTimeout: () => debugPrint('[AISA] restoreOnboardingState timed out (10s) — skipping'),
-      );
-      print('DEBUG main: After restore - onboardingCompleted=${SharedPreferencesUtil().onboardingCompleted}');
+      step('9b: restoreOnboardingState START');
+      try {
+        await AuthService.instance.restoreOnboardingState().timeout(
+          const Duration(seconds: 10),
+          onTimeout: () => debugPrint('[AISA] restoreOnboardingState timed out (10s) — skipping'),
+        );
+      } catch (e) {
+        debugPrint('[AISA] restoreOnboardingState error: $e');
+      }
+      step('9b: restoreOnboardingState DONE');
     }
   }
-  initOpus(await opus_flutter.load());
 
-  await GrowthbookUtil.init();
+  step('10: opus_flutter.load START');
+  try {
+    initOpus(await opus_flutter.load().timeout(
+      const Duration(seconds: 10),
+      onTimeout: () => throw TimeoutException('opus_flutter.load', const Duration(seconds: 10)),
+    ));
+  } catch (e) {
+    debugPrint('[AISA] opus_flutter.load error/timeout: $e');
+  }
+  step('10: opus_flutter.load DONE');
+
+  step('11: GrowthbookUtil.init START');
+  try {
+    await GrowthbookUtil.init().timeout(
+      const Duration(seconds: 5),
+      onTimeout: () => debugPrint('[AISA] GrowthbookUtil.init timed out (5s)'),
+    );
+  } catch (e) {
+    debugPrint('[AISA] GrowthbookUtil.init error: $e');
+  }
+  step('11: GrowthbookUtil.init DONE');
   // Register native BLE bridge
   BleFlutterApi.setUp(BleBridge.instance);
 
@@ -219,7 +284,17 @@ Future _init() async {
     Logger.debug('main: restored ${peripheralUuids.length} BLE peripherals');
   };
 
-  await CrashlyticsManager.init();
+  step('12: CrashlyticsManager.init START');
+  try {
+    await CrashlyticsManager.init().timeout(
+      const Duration(seconds: 5),
+      onTimeout: () => debugPrint('[AISA] CrashlyticsManager.init timed out (5s)'),
+    );
+  } catch (e) {
+    debugPrint('[AISA] CrashlyticsManager.init error: $e');
+  }
+  step('12: CrashlyticsManager.init DONE');
+
   if (isAuth) {
     PlatformManager.instance.crashReporter.identifyUser(
       FirebaseAuth.instance.currentUser?.email ?? '',
@@ -236,7 +311,17 @@ Future _init() async {
     return true;
   };
 
-  await ServiceManager.instance().start();
+  step('13: ServiceManager.start START');
+  try {
+    await ServiceManager.instance().start().timeout(
+      const Duration(seconds: 10),
+      onTimeout: () => debugPrint('[AISA] ServiceManager.start timed out (10s)'),
+    );
+  } catch (e) {
+    debugPrint('[AISA] ServiceManager.start error: $e');
+  }
+  step('13: ServiceManager.start DONE');
+  step('_init() COMPLETE — calling runApp next');
   return;
 }
 
