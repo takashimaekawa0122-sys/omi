@@ -259,20 +259,10 @@ Future<http.Response> makeMultipartApiCall({
         response = await http.Response.fromStream(streamedResponse);
         Logger.log('Token refreshed and multipart request retried');
         if (response.statusCode == 401) {
-          await AuthService.instance.signOut();
-          Logger.handle(
-            Exception('Authentication failed. Please sign in again.'),
-            StackTrace.current,
-            message: 'Authentication failed. Please sign in again.',
-          );
+          Logger.log('Authentication failed after token refresh (401) for multipart. Backend may not accept this Firebase project token.');
         }
       } else {
-        await AuthService.instance.signOut();
-        Logger.handle(
-          Exception('Authentication failed. Please sign in again.'),
-          StackTrace.current,
-          message: 'Authentication failed. Please sign in again.',
-        );
+        Logger.log('Authentication failed: no valid token available for multipart.');
       }
     }
 
@@ -375,21 +365,11 @@ Stream<String> makeMultipartStreamingApiCall({
         response = await HttpPoolManager.instance.sendStreaming(request);
         Logger.log('Token refreshed and multipart streaming request retried');
         if (response.statusCode == 401) {
-          await AuthService.instance.signOut();
-          Logger.handle(
-            Exception('Authentication failed. Please sign in again.'),
-            StackTrace.current,
-            message: 'Authentication failed. Please sign in again.',
-          );
+          Logger.log('Authentication failed after token refresh (401) for multipart streaming. Backend may not accept this Firebase project token.');
           return;
         }
       } else {
-        await AuthService.instance.signOut();
-        Logger.handle(
-          Exception('Authentication failed. Please sign in again.'),
-          StackTrace.current,
-          message: 'Authentication failed. Please sign in again.',
-        );
+        Logger.log('Authentication failed: no valid token available for multipart streaming.');
         return;
       }
     }
