@@ -337,11 +337,33 @@ class SDCardWalSyncImpl implements SDCardWalSync {
     bool hasError = false;
     bool firstDataReceived = false;
     Timer? timeoutTimer;
+    // アイドルタイマー: デバイスが0x00（準備OK）を送った後にデータが来なくなった場合に検出する
+    // 初回タイムアウト（5秒）はキャンセルされるが、その後データが途絶えた場合はこちらが発火
+    Timer? inactivityTimer;
+
+    void _resetInactivityTimer() {
+      inactivityTimer?.cancel();
+      if (!completer.isCompleted) {
+        inactivityTimer = Timer(const Duration(seconds: 30), () {
+          if (!completer.isCompleted) {
+            hasError = true;
+            Logger.debug('SD card BLE inactivity timeout: no data for 30s after handshake');
+            DebugLogManager.logWarning('SD card BLE inactivity: device stopped responding', {'offset': offset});
+            completer.completeError(
+              TimeoutException('SD card stopped sending data after 30 seconds'),
+            );
+          }
+        });
+      }
+    }
 
     _storageStream = await _getBleStorageBytesListener(
       deviceId,
       onStorageBytesReceived: (List<int> value) async {
         if (value.isEmpty || hasError) return;
+
+        // パケット受信のたびにアイドルタイマーをリセット
+        _resetInactivityTimer();
 
         if (!firstDataReceived) {
           firstDataReceived = true;
@@ -417,6 +439,7 @@ class SDCardWalSyncImpl implements SDCardWalSync {
     } finally {
       await _storageStream?.cancel();
       timeoutTimer.cancel();
+      inactivityTimer?.cancel(); // アイドルタイマーも必ずキャンセル
     }
 
     // After download: compute accurate duration from actual frame count
