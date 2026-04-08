@@ -154,21 +154,24 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
 
   /// AISA Phase 2: ディスク上の未同期WALをGroq Whisperで文字起こしする
   /// 起動時 & WAL追加時（SDカードダウンロード完了後など）に呼ばれる
+  /// 処理中に新チャンクが到着しても、完了後に再チェックして取りこぼしを防ぐ
   Future<void> _triggerAisaOfflineSyncIfNeeded() async {
     if (_isAisaSyncing) return;
 
-    // ディスク上の未同期WALのみ対象（メモリはライブ録音が処理中）
-    final pendingWals = _allWals
-        .where((w) => w.status == WalStatus.miss && w.storage == WalStorage.disk)
-        .toList();
-    if (pendingWals.isEmpty) return;
-
     _isAisaSyncing = true;
     try {
-      Logger.debug('[AISA Offline] ${pendingWals.length}件のオフライン録音をGroq Whisperで処理開始');
-      final phoneSync = _walService.getSyncs().phone as LocalWalSyncImpl;
-      await AisaOfflineSyncService.instance.syncPendingWals(pendingWals, phoneSync);
-      await refreshWals();
+      // 処理が完了してもまだ pending がある限りループ（チャンク逐次到着に対応）
+      while (true) {
+        await refreshWals();
+        final pendingWals = _allWals
+            .where((w) => w.status == WalStatus.miss && w.storage == WalStorage.disk)
+            .toList();
+        if (pendingWals.isEmpty) break;
+
+        Logger.debug('[AISA Offline] ${pendingWals.length}件のオフライン録音をGroq Whisperで処理');
+        final phoneSync = _walService.getSyncs().phone as LocalWalSyncImpl;
+        await AisaOfflineSyncService.instance.syncPendingWals(pendingWals, phoneSync);
+      }
       Logger.debug('[AISA Offline] オフライン同期完了');
     } catch (e) {
       Logger.debug('[AISA Offline] オフライン同期エラー: $e');
