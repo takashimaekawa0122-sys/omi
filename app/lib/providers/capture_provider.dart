@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -1291,36 +1292,52 @@ class CaptureProvider extends ChangeNotifier
   }
 
   Future<void> _triggerAisaTranscription() async {
-    if (_aisaFrameBuffer.isEmpty) {
-      Logger.debug('[AISA] バッファ空 スキップ');
-      return;
-    }
-    final frameCount = _aisaFrameBuffer.length;
+    if (_aisaFrameBuffer.isEmpty) return;
     final frames = List<List<int>>.from(_aisaFrameBuffer);
     _aisaFrameBuffer.clear();
     try {
       final wavUtil = WavBytesUtil(codec: _aisaCodec, framesPerSecond: _aisaCodec.getFramesPerSecond());
       final wavFile = await wavUtil.createWavByCodec(frames,
           filename: 'aisa_${DateTime.now().millisecondsSinceEpoch}.wav');
-      final wavSize = await wavFile.length();
-      // 【診断】バッファサイズをFirestoreに記録
-      await AisaFirestoreService.instance.saveTranscript(
-          '[診断] codec=${_aisaCodec} frames=$frameCount wavBytes=$wavSize');
+
+      // 無音検出: 声が含まれていない場合はAPIを呼ばない
+      if (!_hasVoiceActivity(await wavFile.readAsBytes())) {
+        await wavFile.delete();
+        return;
+      }
+
       final transcript = await AisaTranscriptionService.instance.processAndSave(wavFile);
       if (transcript != null && transcript.trim().isNotEmpty) {
         _addAisaConversation(transcript);
-      } else {
-        // 【診断】Avalon結果なし
-        await AisaFirestoreService.instance.saveTranscript('[診断] Avalon応答なし or 空テキスト');
       }
     } catch (e) {
       Logger.debug('[AISA] 音声処理失敗: $e');
-      await AisaFirestoreService.instance.saveTranscript('[診断] エラー: $e');
     }
   }
 
+  /// WAVバイト列のRMS振幅を計算し、声が含まれているか判定する
+  /// 44バイトのWAVヘッダーをスキップし、16bit PCMサンプルのRMSを計算
+  bool _hasVoiceActivity(List<int> wavBytes) {
+    if (wavBytes.length <= 44) return false;
+    double sumSquares = 0;
+    int count = 0;
+    for (int i = 44; i < wavBytes.length - 1; i += 2) {
+      int sample = (wavBytes[i + 1] << 8) | wavBytes[i];
+      if (sample > 32767) sample -= 65536; // signed変換
+      sumSquares += sample * sample;
+      count++;
+    }
+    if (count == 0) return false;
+    final rms = sqrt(sumSquares / count);
+    return rms > 500; // 500未満は無音/ノイズ、500以上は声と判定
+  }
+
   void _addAisaConversation(String transcript) {
-    if (conversationProvider == null) return;
+    if (conversationProvider == null) {
+      AisaFirestoreService.instance.saveTranscript('[診断] conversationProvider=null のためUI追加スキップ transcript=$transcript');
+      return;
+    }
+    AisaFirestoreService.instance.saveTranscript('[診断] upsertConversation呼び出し中 transcript=$transcript');
     final now = DateTime.now();
     final conversation = ServerConversation(
       id: 'aisa_${now.millisecondsSinceEpoch}',

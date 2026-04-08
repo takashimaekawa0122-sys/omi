@@ -48,6 +48,15 @@ ENVEOF
 flutter pub get
 dart run build_runner build --delete-conflicting-outputs
 
+# GROQ_API_KEYは ~/omi_secrets.sh から読み込む（リポジトリには含めない）
+if [ -f ~/omi_secrets.sh ]; then
+  source ~/omi_secrets.sh
+fi
+if [ -z "$GROQ_API_KEY" ]; then
+  echo "⚠️  GROQ_API_KEY が未設定です。~/omi_secrets.sh に記載してください。"
+  exit 1
+fi
+
 mkdir -p ios/Config/Dev ios/Config/Prod
 cp setup/prebuilt/GoogleService-Info.plist ios/Config/Dev/GoogleService-Info.plist
 cp setup/prebuilt/GoogleService-Info.plist ios/Config/Prod/GoogleService-Info.plist
@@ -55,7 +64,8 @@ cp setup/prebuilt/GoogleService-Info.plist ios/Runner/GoogleService-Info.plist
 
 cd ios && pod install && cd ..
 
-flutter build ios --flavor dev --release --no-codesign
+flutter build ios --flavor dev --release --no-codesign \
+  "--dart-define=GROQ_API_KEY=$GROQ_API_KEY"
 
 APP_PATH=$(find build/ios/iphoneos -name '*.app' | head -1)
 rm -rf build/ios/ipa

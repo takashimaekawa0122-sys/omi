@@ -1,7 +1,7 @@
 // app/lib/services/aisa_transcription_service.dart
 //
-// A.I.S.A. Avalon API 文字起こしサービス
-// 音声フレームをWAVに変換し、Avalon APIで文字起こしして Firestore に保存する
+// A.I.S.A. Groq Whisper 文字起こしサービス
+// 音声フレームをWAVに変換し、Groq Whisper APIで文字起こしして Firestore に保存する
 
 import 'dart:convert';
 import 'dart:io';
@@ -15,16 +15,13 @@ class AisaTranscriptionService {
   AisaTranscriptionService._();
   static final AisaTranscriptionService instance = AisaTranscriptionService._();
 
-  static const _endpoint = 'https://api.aquavoice.com/api/v1/audio/transcriptions';
-  static const _avalonApiKey = 'ava_T36UOxfEN_QUrpg2V-l6fzhZfplNoCFJUHLwAylKzrY';
+  static const _endpoint = 'https://api.groq.com/openai/v1/audio/transcriptions';
+  static const _groqApiKey = String.fromEnvironment('GROQ_API_KEY');
 
   /// 音声ファイルを文字起こししてFirestoreに保存し、テキストを返す
   Future<String?> processAndSave(File wavFile) async {
     try {
-      const apiKey = _avalonApiKey;
-      await AisaFirestoreService.instance.saveTranscript('[診断] APIキー確認OK length=${apiKey.length} prefix=${apiKey.substring(0, 8)}');
-
-      final transcript = await _transcribe(wavFile, apiKey);
+      final transcript = await _transcribe(wavFile);
       if (transcript != null && transcript.trim().isNotEmpty) {
         await AisaFirestoreService.instance.saveTranscript(transcript);
         debugPrint('[AISA] 文字起こし成功: $transcript');
@@ -44,28 +41,27 @@ class AisaTranscriptionService {
     }
   }
 
-  Future<String?> _transcribe(File wavFile, String apiKey) async {
+  Future<String?> _transcribe(File wavFile) async {
     final request = http.MultipartRequest('POST', Uri.parse(_endpoint));
-    request.headers['Authorization'] = 'Bearer $apiKey';
+    request.headers['Authorization'] = 'Bearer $_groqApiKey';
     request.headers['User-Agent'] = 'AISA/1.0 (iOS; Flutter)';
     request.headers['Accept'] = 'application/json';
-    request.fields['model'] = 'avalon-v1-en';
+    request.fields['model'] = 'whisper-large-v3';
+    request.fields['language'] = 'ja';
+    request.fields['response_format'] = 'json';
     request.files.add(await http.MultipartFile.fromPath('file', wavFile.path));
 
     final streamedResponse = await request.send();
     final body = await streamedResponse.stream.bytesToString();
 
     if (streamedResponse.statusCode != 200) {
-      debugPrint('[AISA] Avalon API エラー ${streamedResponse.statusCode}: $body');
+      debugPrint('[AISA] Groq API エラー ${streamedResponse.statusCode}: $body');
       await AisaFirestoreService.instance.saveTranscript(
-          '[診断] Avalon HTTP ${streamedResponse.statusCode}: ${body.length > 200 ? body.substring(0, 200) : body}');
+          '[診断] Groq HTTP ${streamedResponse.statusCode}: ${body.length > 200 ? body.substring(0, 200) : body}');
       return null;
     }
 
     final json = jsonDecode(body) as Map<String, dynamic>;
-    final text = json['text'] as String?;
-    await AisaFirestoreService.instance.saveTranscript(
-        '[診断] Avalon HTTP 200 text="${text}" json_keys=${json.keys.toList()}');
-    return text;
+    return json['text'] as String?;
   }
 }
