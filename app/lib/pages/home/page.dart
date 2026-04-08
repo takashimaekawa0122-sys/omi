@@ -480,7 +480,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
       final syncProvider = Provider.of<SyncProvider>(context, listen: false);
       deviceProvider.onDeviceConnected = (BtDevice device) async {
         // 既存: ファームウェアアナウンス確認
-        await _onDeviceConnectedForAnnouncements(device);
+        _onDeviceConnectedForAnnouncements(device);
         // AISA: デバイス接続時に自動でBLE同期を開始（ファームウェアバージョン不問）
         if (!mounted) return;
         if (!syncProvider.isSyncing) {
