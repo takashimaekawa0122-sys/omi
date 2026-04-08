@@ -52,16 +52,18 @@ final class OmiBleManager: NSObject {
 
     private override init() {
         super.init()
-        NSLog("[OmiBle] Initializing OmiBleManager with restore ID: \(OmiBleManager.restoreIdentifier)")
+        // NOTE: CBCentralManagerOptionRestoreIdentifierKey は意図的に省略。
+        // ステート復元を有効にするとアプリ終了後もiOSがバックグラウンドでBLE再接続を行い、
+        // ペンダントがSDカード録音モードに入れなくなるため。
+        // アプリ再起動時の再接続は Flutter側 initiateConnection() が担う。
         centralManager = CBCentralManager(
             delegate: self,
             queue: nil,
             options: [
-                CBCentralManagerOptionRestoreIdentifierKey: OmiBleManager.restoreIdentifier,
                 CBCentralManagerOptionShowPowerAlertKey: true,
             ]
         )
-        NSLog("[OmiBle] CBCentralManager created")
+        NSLog("[OmiBle] CBCentralManager created (state restoration disabled for SD card recording support)")
     }
 
     func setFlutterApi(_ api: BleFlutterApi) {

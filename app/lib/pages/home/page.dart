@@ -201,6 +201,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
     } else if (state == AppLifecycleState.resumed) {
       event = 'App is resumed';
 
+      // BLEステート復元を無効化したため、フォアグラウンド復帰時に再接続を試みる
+      if (mounted) {
+        context.read<DeviceProvider>().initiateConnection('AppResumed', boundDeviceOnly: true);
+      }
+
       // Reload convos
       if (mounted) {
         Provider.of<ConversationProvider>(context, listen: false).refreshConversations();
