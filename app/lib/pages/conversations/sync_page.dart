@@ -298,12 +298,115 @@ class SyncPage extends StatefulWidget {
 }
 
 class _SyncPageState extends State<SyncPage> {
+  // AISA診断: ペンダントストレージの生データ
+  List<int>? _storageRaw;
+  bool _isDiagnosing = false;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       context.read<SyncProvider>().refreshWals();
     });
+  }
+
+  Future<void> _runStorageDiagnostics() async {
+    if (_isDiagnosing) return;
+    setState(() { _isDiagnosing = true; _storageRaw = null; });
+    try {
+      final deviceProvider = context.read<DeviceProvider>();
+      if (!deviceProvider.isConnected || deviceProvider.connectedDevice == null) {
+        setState(() { _storageRaw = []; _isDiagnosing = false; });
+        return;
+      }
+      final connection = await ServiceManager.instance().device.ensureConnection(
+        deviceProvider.connectedDevice!.id,
+      );
+      if (connection == null) {
+        setState(() { _storageRaw = []; _isDiagnosing = false; });
+        return;
+      }
+      final result = await connection.getStorageList();
+      if (mounted) setState(() { _storageRaw = result; _isDiagnosing = false; });
+    } catch (e) {
+      if (mounted) setState(() { _storageRaw = [-1]; _isDiagnosing = false; });
+    }
+  }
+
+  Widget _buildStorageDiagnosticsCard() {
+    if (_storageRaw == null && !_isDiagnosing) return const SizedBox.shrink();
+    final totalBytes = (_storageRaw != null && _storageRaw!.isNotEmpty && _storageRaw![0] != -1)
+        ? _storageRaw![0]
+        : null;
+    final storageOffset = (_storageRaw != null && _storageRaw!.length >= 2)
+        ? _storageRaw![1]
+        : null;
+    final unread = (totalBytes != null && storageOffset != null) ? totalBytes - storageOffset : null;
+
+    Color statusColor;
+    String statusText;
+    if (_isDiagnosing) {
+      statusColor = Colors.orange;
+      statusText = '読み取り中...';
+    } else if (_storageRaw == null || _storageRaw!.isEmpty || _storageRaw![0] == -1) {
+      statusColor = Colors.red;
+      statusText = 'ペンダントが応答しませんでした';
+    } else if (totalBytes == 0) {
+      statusColor = Colors.orange;
+      statusText = 'SDカードにデータなし（totalBytes = 0）';
+    } else if (unread != null && unread > 0) {
+      statusColor = Colors.green;
+      statusText = '未同期データあり（$unread bytes）';
+    } else {
+      statusColor = Colors.orange;
+      statusText = '未同期データなし（offset = totalBytes）';
+    }
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 12),
+      child: Container(
+        decoration: BoxDecoration(
+          color: const Color(0xFF1C1C1E),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: statusColor.withOpacity(0.4), width: 1),
+        ),
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.storage, color: statusColor, size: 16),
+                const SizedBox(width: 8),
+                Text('ストレージ診断', style: TextStyle(color: statusColor, fontSize: 13, fontWeight: FontWeight.w600)),
+              ],
+            ),
+            const SizedBox(height: 8),
+            if (_isDiagnosing)
+              const Center(child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)))
+            else ...[
+              _diagRow('totalBytes', totalBytes?.toString() ?? 'N/A'),
+              _diagRow('storageOffset', storageOffset?.toString() ?? 'N/A'),
+              _diagRow('未読バイト数', unread?.toString() ?? 'N/A'),
+              const SizedBox(height: 6),
+              Text(statusText, style: TextStyle(color: statusColor, fontSize: 12)),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _diagRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
+        children: [
+          Text('$label: ', style: const TextStyle(color: Color(0xFF8E8E93), fontSize: 12)),
+          Text(value, style: const TextStyle(color: Colors.white, fontSize: 12, fontFamily: 'monospace')),
+        ],
+      ),
+    );
   }
 
   Widget _buildSettingsItem({
@@ -942,51 +1045,59 @@ class _SyncPageState extends State<SyncPage> {
       if (!deviceProvider.isConnected) {
         return const SizedBox.shrink();
       }
-      return Container(
-        decoration: BoxDecoration(color: const Color(0xFF1C1C1E), borderRadius: BorderRadius.circular(20)),
-        child: GestureDetector(
-          onTap: () => syncProvider.syncWalsViaBle(),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
-            child: Row(
-              children: [
-                SizedBox(
-                  width: 24,
-                  height: 24,
-                  child: _buildFaIcon(FontAwesomeIcons.arrowsRotate, color: Colors.deepPurpleAccent),
-                ),
-                const SizedBox(width: 16),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text(
-                        'デバイスをスキャン',
-                        style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w500),
+      return Column(
+        children: [
+          Container(
+            decoration: BoxDecoration(color: const Color(0xFF1C1C1E), borderRadius: BorderRadius.circular(20)),
+            child: GestureDetector(
+              onTap: () {
+                _runStorageDiagnostics();
+                syncProvider.syncWalsViaBle();
+              },
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
+                child: Row(
+                  children: [
+                    SizedBox(
+                      width: 24,
+                      height: 24,
+                      child: _buildFaIcon(FontAwesomeIcons.arrowsRotate, color: Colors.deepPurpleAccent),
+                    ),
+                    const SizedBox(width: 16),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text(
+                            'デバイスをスキャン',
+                            style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w500),
+                          ),
+                          const SizedBox(height: 3),
+                          Text(
+                            'SDカードに新しい録音がないか確認します',
+                            style: TextStyle(color: Colors.grey.shade500, fontSize: 13),
+                          ),
+                        ],
                       ),
-                      const SizedBox(height: 3),
-                      Text(
-                        'SDカードに新しい録音がないか確認します',
-                        style: TextStyle(color: Colors.grey.shade500, fontSize: 13),
+                    ),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: Colors.deepPurpleAccent,
+                        borderRadius: BorderRadius.circular(100),
                       ),
-                    ],
-                  ),
+                      child: const Text(
+                        'スキャン',
+                        style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600),
+                      ),
+                    ),
+                  ],
                 ),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                  decoration: BoxDecoration(
-                    color: Colors.deepPurpleAccent,
-                    borderRadius: BorderRadius.circular(100),
-                  ),
-                  child: const Text(
-                    'スキャン',
-                    style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600),
-                  ),
-                ),
-              ],
+              ),
             ),
           ),
-        ),
+          _buildStorageDiagnosticsCard(),
+        ],
       );
     }
 
