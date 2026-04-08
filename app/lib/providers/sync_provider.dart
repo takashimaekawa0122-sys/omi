@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import 'package:omi/backend/schema/conversation.dart';
+import 'package:omi/services/aisa_offline_sync_service.dart';
 import 'package:omi/services/services.dart';
 import 'package:omi/services/wals.dart';
 import 'package:omi/utils/debug_log_manager.dart';
@@ -149,8 +150,8 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
 
   bool _isAutoUploading = false;
 
-  /// Auto-upload phone WALs to cloud on app open when device is not connected
-  /// and no sync is already in progress.
+  /// アプリ起動時にペンダントのオフライン録音をGroq Whisperで文字起こしする（AISA Phase 2）
+  /// 元のOmiクラウドへのアップロードの代わりにAISAオフライン同期を実行する
   void _autoUploadPendingPhoneFiles() async {
     await Future.delayed(const Duration(seconds: 3));
     if (_syncState.isProcessing) return;
@@ -159,13 +160,11 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
         .where((w) => w.status == WalStatus.miss && (w.storage == WalStorage.disk || w.storage == WalStorage.mem))
         .toList();
     if (phoneWals.isEmpty) return;
-    Logger.debug('SyncProvider: Auto-uploading ${phoneWals.length} pending phone files to cloud');
-    _isAutoUploading = true;
-    await _performSync(
-      operation: () => _walService.getSyncs().phone.syncAll(progress: this),
-      context: 'auto-upload phone files',
-    );
-    _isAutoUploading = false;
+
+    Logger.debug('[AISA Offline] ${phoneWals.length}件のオフライン録音をGroq Whisperで処理');
+    final phoneSync = _walService.getSyncs().phone as LocalWalSyncImpl;
+    await AisaOfflineSyncService.instance.syncPendingWals(phoneWals, phoneSync);
+    await refreshWals();
   }
 
   /// Cancel auto-upload if running. Called before device-triggered sync.

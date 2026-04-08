@@ -16,6 +16,7 @@ import 'package:permission_handler/permission_handler.dart';
 
 import 'package:omi/backend/http/api/conversations.dart';
 import 'package:omi/services/aisa_firestore_service.dart';
+import 'package:omi/services/aisa_offline_sync_service.dart';
 import 'package:omi/services/aisa_transcription_service.dart';
 import 'package:omi/utils/audio/wav_bytes.dart';
 import 'package:omi/backend/http/api/users.dart';
@@ -91,6 +92,7 @@ class CaptureProvider extends ChangeNotifier
   bool get isWalSupported => _isWalSupported;
 
   StreamSubscription<bool>? _connectionStateListener;
+  StreamSubscription<String>? _aisaOfflineSubscription;
   bool _isConnected = ConnectivityService().isConnected;
 
   get isConnected => _isConnected;
@@ -167,6 +169,11 @@ class CaptureProvider extends ChangeNotifier
   CaptureProvider() {
     _connectionStateListener = ConnectivityService().onConnectionChange.listen((bool isConnected) {
       onConnectionStateChanged(isConnected);
+    });
+    // AISA: オフライン同期で生成されたトランスクリプトを会話リストに追加
+    _aisaOfflineSubscription =
+        AisaOfflineSyncService.instance.transcriptStream.listen((transcript) {
+      _addAisaConversation(transcript);
     });
   }
 
@@ -923,6 +930,7 @@ class CaptureProvider extends ChangeNotifier
     _keepAliveTimer?.cancel();
     _aisaTimer?.cancel();
     _connectionStateListener?.cancel();
+    _aisaOfflineSubscription?.cancel();
     _metricsTimer?.cancel();
     _peopleRefreshFuture = null; // Clear in-flight tracker
 
