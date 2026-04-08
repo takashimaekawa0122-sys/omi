@@ -1291,19 +1291,31 @@ class CaptureProvider extends ChangeNotifier
   }
 
   Future<void> _triggerAisaTranscription() async {
-    if (_aisaFrameBuffer.isEmpty) return;
+    if (_aisaFrameBuffer.isEmpty) {
+      Logger.debug('[AISA] バッファ空 スキップ');
+      return;
+    }
+    final frameCount = _aisaFrameBuffer.length;
     final frames = List<List<int>>.from(_aisaFrameBuffer);
     _aisaFrameBuffer.clear();
     try {
       final wavUtil = WavBytesUtil(codec: _aisaCodec, framesPerSecond: _aisaCodec.getFramesPerSecond());
       final wavFile = await wavUtil.createWavByCodec(frames,
           filename: 'aisa_${DateTime.now().millisecondsSinceEpoch}.wav');
+      final wavSize = await wavFile.length();
+      // 【診断】バッファサイズをFirestoreに記録
+      await AisaFirestoreService.instance.saveTranscript(
+          '[診断] codec=${_aisaCodec} frames=$frameCount wavBytes=$wavSize');
       final transcript = await AisaTranscriptionService.instance.processAndSave(wavFile);
       if (transcript != null && transcript.trim().isNotEmpty) {
         _addAisaConversation(transcript);
+      } else {
+        // 【診断】Avalon結果なし
+        await AisaFirestoreService.instance.saveTranscript('[診断] Avalon応答なし or 空テキスト');
       }
     } catch (e) {
       Logger.debug('[AISA] 音声処理失敗: $e');
+      await AisaFirestoreService.instance.saveTranscript('[診断] エラー: $e');
     }
   }
 
