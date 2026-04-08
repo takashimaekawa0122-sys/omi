@@ -49,18 +49,30 @@ class AisaOfflineSyncService {
     }
 
     // Groq Whisperで文字起こし（synced済みマーク後なのでOmiには送られない）
-    for (final wal in diskWals) {
+    // Groqレート制限: free tier 20 req/min → 最低3秒間隔で送信
+    // 大量WAL処理時に429エラーで全滅するのを防ぐ
+    int successCount = 0;
+    int failCount = 0;
+    for (int i = 0; i < diskWals.length; i++) {
+      final wal = diskWals[i];
       try {
         final transcript = await _processWal(wal);
         if (transcript != null && transcript.trim().isNotEmpty) {
           _transcriptController.add(transcript);
+          successCount++;
         }
       } catch (e) {
         debugPrint('[AISA Offline] WAL文字起こし失敗 ${wal.id}: $e');
+        failCount++;
+      }
+
+      // 最後の1件以外は3秒待機してレート制限を回避
+      if (i < diskWals.length - 1) {
+        await Future.delayed(const Duration(seconds: 3));
       }
     }
 
-    debugPrint('[AISA Offline] ${diskWals.length}件の処理完了');
+    debugPrint('[AISA Offline] ${diskWals.length}件処理完了 (成功: $successCount, 失敗: $failCount)');
   }
 
   /// WAL 1件を処理：.binファイル読み込み → フレームデコード → WAV変換 → Groq Whisper

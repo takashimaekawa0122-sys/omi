@@ -417,8 +417,10 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
   @override
   void onWalUpdated() async {
     await refreshWals();
-    // SDカードダウンロード完了など、WALが追加されるたびにAISA同期をトリガー
-    await _triggerAisaOfflineSyncIfNeeded();
+    // AISA同期が既に実行中の場合はwhileループが新WALを拾うので追加呼び出し不要
+    if (!_isAisaSyncing) {
+      _triggerAisaOfflineSyncIfNeeded(); // fire-and-forget（処理中ならフラグで即リターン）
+    }
   }
 
   @override

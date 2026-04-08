@@ -1352,14 +1352,18 @@ class CaptureProvider extends ChangeNotifier
     return rms > 300; // 300未満は無音/ノイズ、300以上は声と判定
   }
 
+  // AISA: 会話ID生成用カウンター（同一ミリ秒での重複IDを防ぐ）
+  int _aisaConversationCounter = 0;
+
   void _addAisaConversation(String transcript) {
     if (conversationProvider == null) {
       Logger.debug('[AISA] conversationProvider未初期化のためUI追加スキップ');
       return;
     }
     final now = DateTime.now();
+    _aisaConversationCounter++;
     final conversation = ServerConversation(
-      id: 'aisa_${now.millisecondsSinceEpoch}',
+      id: 'aisa_${now.millisecondsSinceEpoch}_$_aisaConversationCounter',
       createdAt: now,
       structured: Structured(
         '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')} の会話',
