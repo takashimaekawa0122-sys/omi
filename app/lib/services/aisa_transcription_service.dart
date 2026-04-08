@@ -58,10 +58,15 @@ class AisaTranscriptionService {
 
     if (streamedResponse.statusCode != 200) {
       debugPrint('[AISA] Avalon API エラー ${streamedResponse.statusCode}: $body');
+      await AisaFirestoreService.instance.saveTranscript(
+          '[診断] Avalon HTTP ${streamedResponse.statusCode}: ${body.length > 200 ? body.substring(0, 200) : body}');
       return null;
     }
 
     final json = jsonDecode(body) as Map<String, dynamic>;
-    return json['text'] as String?;
+    final text = json['text'] as String?;
+    await AisaFirestoreService.instance.saveTranscript(
+        '[診断] Avalon HTTP 200 text="${text}" json_keys=${json.keys.toList()}');
+    return text;
   }
 }
