@@ -15,7 +15,7 @@ class AisaTranscriptionService {
   AisaTranscriptionService._();
   static final AisaTranscriptionService instance = AisaTranscriptionService._();
 
-  static const _endpoint = 'https://api.aqua.sh/v1/audio/transcriptions';
+  static const _endpoint = 'https://api.aquavoice.com/api/v1/audio/transcriptions';
   static const _avalonApiKey = 'ava_T36UOxfEN_QUrpg2V-l6fzhZfplNoCFJUHLwAylKzrY';
 
   /// 音声ファイルを文字起こししてFirestoreに保存し、テキストを返す
@@ -49,8 +49,7 @@ class AisaTranscriptionService {
     request.headers['Authorization'] = 'Bearer $apiKey';
     request.headers['User-Agent'] = 'AISA/1.0 (iOS; Flutter)';
     request.headers['Accept'] = 'application/json';
-    request.fields['model'] = 'avalon-1';
-    request.fields['language'] = 'ja';
+    request.fields['model'] = 'avalon-v1-en';
     request.files.add(await http.MultipartFile.fromPath('file', wavFile.path));
 
     final streamedResponse = await request.send();
