@@ -10,6 +10,7 @@ import 'package:provider/provider.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/models/sync_state.dart';
 import 'package:omi/providers/connectivity_provider.dart';
+import 'package:omi/providers/device_provider.dart';
 import 'package:omi/providers/sync_provider.dart';
 import 'package:omi/providers/user_provider.dart';
 import 'package:omi/services/services.dart';
@@ -935,7 +936,58 @@ class _SyncPageState extends State<SyncPage> {
     final totalSecondsToProcess = syncProvider.missingWalsInSeconds;
 
     if (totalSecondsToProcess == 0) {
-      return const SizedBox.shrink();
+      // AISA: 保留中0でもデバイス接続中ならスキャンボタンを表示
+      // （SDカードに未検出の録音が残っている可能性があるため）
+      final deviceProvider = context.read<DeviceProvider>();
+      if (!deviceProvider.isConnected) {
+        return const SizedBox.shrink();
+      }
+      return Container(
+        decoration: BoxDecoration(color: const Color(0xFF1C1C1E), borderRadius: BorderRadius.circular(20)),
+        child: GestureDetector(
+          onTap: () => syncProvider.syncWalsViaBle(),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
+            child: Row(
+              children: [
+                SizedBox(
+                  width: 24,
+                  height: 24,
+                  child: _buildFaIcon(FontAwesomeIcons.arrowsRotate, color: Colors.deepPurpleAccent),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'デバイスをスキャン',
+                        style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w500),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        'SDカードに新しい録音がないか確認します',
+                        style: TextStyle(color: Colors.grey.shade500, fontSize: 13),
+                      ),
+                    ],
+                  ),
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: Colors.deepPurpleAccent,
+                    borderRadius: BorderRadius.circular(100),
+                  ),
+                  child: const Text(
+                    'スキャン',
+                    style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
     }
 
     return Container(
