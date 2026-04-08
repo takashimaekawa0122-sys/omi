@@ -25,7 +25,7 @@ class AisaOfflineSyncService {
   Stream<String> get transcriptStream => _transcriptController.stream;
 
   /// 未同期のWAL（ディスク上の.binファイル）をGroq Whisperで処理する
-  /// SyncProviderの_autoUploadPendingPhoneFiles()から呼ばれる
+  /// SyncProviderの_triggerAisaOfflineSyncIfNeeded()から呼ばれる
   Future<void> syncPendingWals(
     List<Wal> pendingWals,
     LocalWalSyncImpl phoneSync,
@@ -38,6 +38,17 @@ class AisaOfflineSyncService {
 
     debugPrint('[AISA Offline] ${diskWals.length}件のオフライン録音を処理開始');
 
+    // Omiクラウドへの音声流出を防ぐため、Groq処理の前に全WALをsynced済みとしてマークする
+    // （phone.syncAll()はstatus==missのWALのみ対象にするため、これで送信を確実に防ぐ）
+    for (final wal in diskWals) {
+      try {
+        await phoneSync.markWalSyncedAndPersist(wal);
+      } catch (e) {
+        debugPrint('[AISA Offline] WAL事前マーク失敗（続行） ${wal.id}: $e');
+      }
+    }
+
+    // Groq Whisperで文字起こし（synced済みマーク後なのでOmiには送られない）
     for (final wal in diskWals) {
       try {
         final transcript = await _processWal(wal);
@@ -45,18 +56,11 @@ class AisaOfflineSyncService {
           _transcriptController.add(transcript);
         }
       } catch (e) {
-        debugPrint('[AISA Offline] WAL処理失敗 ${wal.id}: $e');
-      } finally {
-        // 成否にかかわらずAISA処理済みとしてマーク（Omiクラウドへの再送を防ぐ）
-        try {
-          await phoneSync.markWalSyncedAndPersist(wal);
-        } catch (e) {
-          debugPrint('[AISA Offline] WALマーク失敗 ${wal.id}: $e');
-        }
+        debugPrint('[AISA Offline] WAL文字起こし失敗 ${wal.id}: $e');
       }
     }
 
-    debugPrint('[AISA Offline] オフライン同期完了');
+    debugPrint('[AISA Offline] ${diskWals.length}件の処理完了');
   }
 
   /// WAL 1件を処理：.binファイル読み込み → フレームデコード → WAV変換 → Groq Whisper
@@ -72,14 +76,23 @@ class AisaOfflineSyncService {
     if (frames.isEmpty) return null;
 
     // OpusフレームをWAVに変換
+    // wal.idでファイル名を一意にする（timerStartは同一になりうるため）
     final wavUtil = WavBytesUtil(
       codec: wal.codec,
       framesPerSecond: wal.codec.getFramesPerSecond(),
     );
     final wavFile = await wavUtil.createWavByCodec(
       frames,
-      filename: 'aisa_offline_${wal.timerStart}.wav',
+      filename: 'aisa_offline_${wal.id}.wav',
     );
+
+    // ファイルサイズ確認（Groq Whisperは25MB制限）
+    final wavSize = await wavFile.length();
+    if (wavSize > 24 * 1024 * 1024) {
+      debugPrint('[AISA Offline] WAVが大きすぎてスキップ: ${(wavSize / 1024 / 1024).toStringAsFixed(1)}MB (${wal.id})');
+      await wavFile.delete();
+      return null;
+    }
 
     // VAD + Groq Whisper 文字起こし + Firestore保存
     return await AisaTranscriptionService.instance.processAndSave(wavFile);
