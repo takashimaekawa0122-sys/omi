@@ -806,7 +806,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          const BatteryInfoWidget(),
+          const SizedBox.shrink(), // BatteryInfoWidget: デバイス不使用のため非表示
           const SizedBox.shrink(),
           Row(
             children: [
@@ -819,38 +819,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
                   final hasPendingOnDevice = syncProvider.missingWalsOnDevice.isNotEmpty;
                   final isSyncing = syncProvider.isSyncing;
 
-                  // Show sync icon only on home page and if there's a paired device OR if there are pending files on device
-                  if (homeProvider.selectedIndex == 0 && (device != null || hasPendingOnDevice)) {
-                    return GestureDetector(
-                      onTap: () {
-                        HapticFeedback.mediumImpact();
-                        final page = deviceProvider.supportsMultiFileSync ? const AutoSyncPage() : const SyncPage();
-                        Navigator.push(context, MaterialPageRoute(builder: (context) => page));
-                      },
-                      child: Container(
-                        width: 36,
-                        height: 36,
-                        margin: const EdgeInsets.only(right: 8),
-                        decoration: BoxDecoration(
-                          color: isSyncing
-                              ? Colors.deepPurple.withValues(alpha: 0.2)
-                              : hasPendingOnDevice
-                              ? Colors.orange.withValues(alpha: 0.15)
-                              : const Color(0xFF1F1F25),
-                          shape: BoxShape.circle,
-                        ),
-                        child: Icon(
-                          Icons.cloud_rounded,
-                          size: 18,
-                          color: isSyncing
-                              ? Colors.deepPurpleAccent
-                              : hasPendingOnDevice
-                              ? Colors.orangeAccent
-                              : Colors.white70,
-                        ),
-                      ),
-                    );
-                  }
+                  // Syncアイコン: A.I.S.A.ではOmiバックエンド未使用のため非表示
                   return const SizedBox.shrink();
                 },
               ),

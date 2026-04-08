@@ -30,7 +30,6 @@ class AisaTranscriptionService {
       return null;
     } catch (e) {
       debugPrint('[AISA] 文字起こし処理失敗: $e');
-      await AisaFirestoreService.instance.saveTranscript('[診断] processAndSave例外: $e');
       return null;
     } finally {
       try {
@@ -56,8 +55,6 @@ class AisaTranscriptionService {
 
     if (streamedResponse.statusCode != 200) {
       debugPrint('[AISA] Groq API エラー ${streamedResponse.statusCode}: $body');
-      await AisaFirestoreService.instance.saveTranscript(
-          '[診断] Groq HTTP ${streamedResponse.statusCode}: ${body.length > 200 ? body.substring(0, 200) : body}');
       return null;
     }
 

@@ -385,15 +385,8 @@ class CaptureProvider extends ChangeNotifier
     if (_sessionStartSeconds == 0) {
       _sessionStartSeconds = DateTime.now().millisecondsSinceEpoch ~/ 1000;
       WidgetsBinding.instance.addObserver(this);
-      // 【診断】Firestore書き込みテスト（起動時に1回だけ実行）
-      AisaFirestoreService.instance.saveTranscript('[AISA起動テスト] ${DateTime.now()}').then((_) {
-        Logger.debug('[AISA] Firestore書き込みテスト: 成功');
-      }).catchError((e) {
-        Logger.debug('[AISA] Firestore書き込みテスト: 失敗 $e');
-      });
     }
     _aisaTimer ??= Timer.periodic(const Duration(seconds: 5), (_) {
-      Logger.debug('[AISA] タイマー発火 バッファ=${_aisaFrameBuffer.length}フレーム');
       _triggerAisaTranscription();
     });
     notifyListeners();
@@ -1329,15 +1322,14 @@ class CaptureProvider extends ChangeNotifier
     }
     if (count == 0) return false;
     final rms = sqrt(sumSquares / count);
-    return rms > 500; // 500未満は無音/ノイズ、500以上は声と判定
+    return rms > 300; // 300未満は無音/ノイズ、300以上は声と判定
   }
 
   void _addAisaConversation(String transcript) {
     if (conversationProvider == null) {
-      AisaFirestoreService.instance.saveTranscript('[診断] conversationProvider=null のためUI追加スキップ transcript=$transcript');
+      Logger.debug('[AISA] conversationProvider未初期化のためUI追加スキップ');
       return;
     }
-    AisaFirestoreService.instance.saveTranscript('[診断] upsertConversation呼び出し中 transcript=$transcript');
     final now = DateTime.now();
     final conversation = ServerConversation(
       id: 'aisa_${now.millisecondsSinceEpoch}',
