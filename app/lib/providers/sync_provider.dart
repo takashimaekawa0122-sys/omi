@@ -253,13 +253,33 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
     _totalWalsToProcess = missingWals.length;
     _walsProcessedCount = 0;
 
-    // AISA: SDカード転送中はBLE帯域を占有するため音声ストリーミングを一時停止する。
-    // ペンダントは音声ストリーミングとファイル転送を同時に処理できないため
-    // タイムアウトエラーが発生していた。
+    // AISA: SDカード転送中はBLE帯域を占有するため、全BLE通知を停止する。
+    // stopStreamDeviceRecording()はDartのStreamをキャンセルするだけで
+    // ネイティブのBLE subscribeは解除されない。そのためペンダントが音声データを
+    // 送り続けBLE帯域が圧迫され「デバイスが応答しません」が発生していた。
     final wasStreaming = _captureProvider != null;
     if (wasStreaming) {
-      Logger.debug('[AISA] SDカード同期前に音声ストリーミングを一時停止');
+      Logger.debug('[AISA] SDカード同期前に音声ストリーミングを停止');
       await _captureProvider!.stopStreamDeviceRecording();
+    }
+
+    // ネイティブBLE通知を明示的に全解除（帯域をファイル転送専用に確保）
+    final deviceId = SharedPreferencesUtil().btDevice.id;
+    if (deviceId.isNotEmpty) {
+      try {
+        final connection = await ServiceManager.instance().device.ensureConnection(deviceId);
+        if (connection != null) {
+          final transport = connection.transport;
+          if (transport is dynamic && transport.runtimeType.toString().contains('NativeBle')) {
+            await (transport as dynamic).pauseAllNotifications();
+            Logger.debug('[AISA] BLE通知全解除完了 → SDカード転送開始');
+          }
+        }
+      } catch (e) {
+        Logger.debug('[AISA] pauseAllNotifications failed (non-critical): $e');
+      }
+      // ペンダントが通知停止を処理する時間を確保
+      await Future.delayed(const Duration(milliseconds: 500));
     }
 
     try {

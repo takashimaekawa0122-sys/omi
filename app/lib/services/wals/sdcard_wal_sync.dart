@@ -349,13 +349,15 @@ class SDCardWalSyncImpl implements SDCardWalSync {
     void _resetInactivityTimer() {
       inactivityTimer?.cancel();
       if (!completer.isCompleted) {
-        inactivityTimer = Timer(const Duration(seconds: 30), () {
+        // 非アクティブタイムアウト: 120秒（旧30秒）
+        // 24分超の大容量データ転送中にペンダントが一時停止しても継続できるよう延長
+        inactivityTimer = Timer(const Duration(seconds: 120), () {
           if (!completer.isCompleted) {
             hasError = true;
-            Logger.debug('SD card BLE inactivity timeout: no data for 30s after handshake');
+            Logger.debug('SD card BLE inactivity timeout: no data for 120s after handshake');
             DebugLogManager.logWarning('SD card BLE inactivity: device stopped responding', {'offset': offset});
             completer.completeError(
-              TimeoutException('SD card stopped sending data after 30 seconds'),
+              TimeoutException('SD card stopped sending data after 120 seconds'),
             );
           }
         });
@@ -454,12 +456,14 @@ class SDCardWalSyncImpl implements SDCardWalSync {
 
     await _writeToStorage(deviceId, fileNum, 0, offset);
 
-    timeoutTimer = Timer(const Duration(seconds: 5), () {
+    // 初回データ受信タイムアウト: 30秒（旧5秒）
+    // ペンダントが音声モードからファイル転送モードに切り替わるまでの時間を確保
+    timeoutTimer = Timer(const Duration(seconds: 30), () {
       if (!firstDataReceived && !completer.isCompleted) {
         hasError = true;
-        final error = TimeoutException('No data received from SD card within 5 seconds');
+        final error = TimeoutException('No data received from SD card within 30 seconds');
         Logger.debug('SD card read timeout: ${error.message}');
-        DebugLogManager.logWarning('SD card BLE read timeout: no data in 5s', {'offset': offset});
+        DebugLogManager.logWarning('SD card BLE read timeout: no data in 30s', {'offset': offset});
         completer.completeError(error);
       }
     });
@@ -663,12 +667,14 @@ class SDCardWalSyncImpl implements SDCardWalSync {
 
     await _writeToStorage(deviceId, fileNum, 0, offset);
 
-    timeoutTimer = Timer(const Duration(seconds: 5), () {
+    // 初回データ受信タイムアウト: 30秒（旧5秒）
+    // ペンダントが音声モードからファイル転送モードに切り替わるまでの時間を確保
+    timeoutTimer = Timer(const Duration(seconds: 30), () {
       if (!firstDataReceived && !completer.isCompleted) {
         hasError = true;
-        final error = TimeoutException('No data received from SD card within 5 seconds');
+        final error = TimeoutException('No data received from SD card within 30 seconds');
         Logger.debug('SD card read timeout: ${error.message}');
-        DebugLogManager.logWarning('SD card BLE read timeout: no data in 5s', {'offset': offset});
+        DebugLogManager.logWarning('SD card BLE read timeout: no data in 30s', {'offset': offset});
         completer.completeError(error);
       }
     });

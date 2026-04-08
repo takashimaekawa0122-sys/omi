@@ -76,6 +76,21 @@ class NativeBleTransport extends DeviceTransport {
     }
   }
 
+  /// SDカード同期前に全BLE通知を停止する。
+  /// Dartのstream.cancel()だけではネイティブ側のsubscribeが残るため、
+  /// ペンダントが音声データを送り続けBLE帯域を消費してしまう。
+  Future<void> pauseAllNotifications() async {
+    for (final key in _streamControllers.keys.toList()) {
+      final parts = key.split(':');
+      if (parts.length == 2) {
+        try {
+          _hostApi.unsubscribeCharacteristic(_peripheralUuid, parts[0], parts[1]);
+        } catch (_) {}
+      }
+    }
+    Logger.debug('[NativeBleTransport] pauseAllNotifications: unsubscribed ${_streamControllers.length} characteristics');
+  }
+
   @override
   Future<void> disconnect() async {
     if (_state == DeviceTransportState.disconnected) return;
