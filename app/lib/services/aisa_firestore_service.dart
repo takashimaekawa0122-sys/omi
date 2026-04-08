@@ -96,9 +96,9 @@ class AisaFirestoreService {
       'text': transcript,
       'timestampMs': now.millisecondsSinceEpoch,
       'deleted': false,
-      'source': 'avalon',
+      'source': 'groq',
     });
 
-    debugPrint('[AISA] Avalon文字起こし保存成功: $dateStr');
+    debugPrint('[AISA] Groq文字起こし保存成功: $dateStr');
   }
 }

@@ -119,7 +119,7 @@ class CaptureProvider extends ChangeNotifier
   // Phone mic WAL: buffer for splitting variable-sized PCM chunks into fixed-size frames
   bool _phoneMicWalActive = false;
 
-  // AISA: フレームバッファ（会話終了時に Avalon API へ送信）
+  // AISA: フレームバッファ（会話終了時にGroq Whisperへ送信）
   final List<List<int>> _aisaFrameBuffer = [];
   BleAudioCodec _aisaCodec = BleAudioCodec.pcm16;
 

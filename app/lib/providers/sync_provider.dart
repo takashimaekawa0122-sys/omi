@@ -160,10 +160,8 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
 
     _isAisaSyncing = true;
     try {
-      // 最初に一度だけ最新WALリストを取得
-      await refreshWals();
-
       // 処理が完了してもまだ pending がある限りループ（チャンク逐次到着に対応）
+      // 注: 呼び出し元（_initializeProvider / onWalUpdated）で既にrefreshWals()済み
       while (true) {
         final pendingWals = _allWals
             .where((w) => w.status == WalStatus.miss && w.storage == WalStorage.disk)

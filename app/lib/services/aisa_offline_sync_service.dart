@@ -6,6 +6,7 @@
 
 import 'dart:async';
 import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
@@ -56,19 +57,23 @@ class AisaOfflineSyncService {
     debugPrint('[AISA Offline] ${diskWals.length}件のオフライン録音を処理開始');
 
     // Omiクラウドへの音声流出を防ぐため、Groq処理の前に全WALをsynced済みとしてマークする
-    // （phone.syncAll()はstatus==missのWALのみ対象にするため、これで送信を確実に防ぐ）
+    // 【パフォーマンス最適化】全WALのstatusを直接更新してから最後に1回だけ保存・通知する
+    // （phone.syncAll()はstatus==missのWALのみ対象なので、これで確実にOmi送信を防ぐ）
     for (final wal in diskWals) {
-      try {
-        await phoneSync.markWalSyncedAndPersist(wal);
-      } catch (e) {
-        debugPrint('[AISA Offline] WAL事前マーク失敗（続行） ${wal.id}: $e');
-      }
+      wal.status = WalStatus.synced; // 直接更新（同一オブジェクト参照）
+    }
+    try {
+      // 最後の1件でまとめて保存＆通知（1回のディスク書き込みとUI更新で済む）
+      await phoneSync.markWalSyncedAndPersist(diskWals.last);
+    } catch (e) {
+      debugPrint('[AISA Offline] WAL一括マーク失敗（続行）: $e');
     }
 
     // Groq Whisperで文字起こし（synced済みマーク後なのでOmiには送られない）
     // Groqレート制限: free tier 20 req/min → 最低3秒間隔で送信
     // 大量WAL処理時に429エラーで全滅するのを防ぐ
     int successCount = 0;
+    int skipCount = 0;
     int failCount = 0;
     for (int i = 0; i < diskWals.length; i++) {
       // キャンセルチェック（手動同期開始時などに中断）
@@ -80,7 +85,9 @@ class AisaOfflineSyncService {
       final wal = diskWals[i];
       try {
         final transcript = await _processWal(wal);
-        if (transcript != null && transcript.trim().isNotEmpty) {
+        if (transcript == null) {
+          skipCount++; // 無音またはデコード失敗
+        } else if (transcript.trim().isNotEmpty) {
           _transcriptController.add(transcript);
           successCount++;
         }
@@ -95,10 +102,11 @@ class AisaOfflineSyncService {
       }
     }
 
-    debugPrint('[AISA Offline] ${diskWals.length}件処理完了 (成功: $successCount, 失敗: $failCount)');
+    debugPrint('[AISA Offline] ${diskWals.length}件処理完了 '
+        '(文字起こし成功: $successCount, 無音スキップ: $skipCount, 失敗: $failCount)');
   }
 
-  /// WAL 1件を処理：.binファイル読み込み → フレームデコード → WAV変換 → Groq Whisper
+  /// WAL 1件を処理：.binファイル読み込み → フレームデコード → VAD → WAV変換 → Groq Whisper
   Future<String?> _processWal(Wal wal) async {
     final fullPath = await Wal.getFilePath(wal.filePath);
     if (fullPath == null) return null;
@@ -121,16 +129,42 @@ class AisaOfflineSyncService {
       filename: 'aisa_offline_${wal.id}.wav',
     );
 
-    // ファイルサイズ確認（Groq Whisperは25MB制限）
-    final wavSize = await wavFile.length();
-    if (wavSize > 24 * 1024 * 1024) {
-      debugPrint('[AISA Offline] WAVが大きすぎてスキップ: ${(wavSize / 1024 / 1024).toStringAsFixed(1)}MB (${wal.id})');
+    // VADチェック：無音・ノイズのみのWAVはGroqに送らずスキップ
+    // （ライブ録音と同じ閾値300を使用）
+    final wavBytes = await wavFile.readAsBytes();
+    if (!_hasVoiceActivity(wavBytes)) {
       await wavFile.delete();
       return null;
     }
 
-    // VAD + Groq Whisper 文字起こし + Firestore保存
+    // ファイルサイズ確認（Groq Whisperは25MB制限）
+    final wavSize = wavBytes.length;
+    if (wavSize > 24 * 1024 * 1024) {
+      debugPrint('[AISA Offline] WAVが大きすぎてスキップ: '
+          '${(wavSize / 1024 / 1024).toStringAsFixed(1)}MB (${wal.id})');
+      await wavFile.delete();
+      return null;
+    }
+
+    // Groq Whisper 文字起こし + Firestore保存
     return await AisaTranscriptionService.instance.processAndSave(wavFile);
+  }
+
+  /// WAVバイト列のRMS振幅を計算し、声が含まれているか判定する
+  /// 44バイトのWAVヘッダーをスキップし、16bit PCMサンプルのRMSを計算
+  bool _hasVoiceActivity(List<int> wavBytes) {
+    if (wavBytes.length <= 44) return false;
+    double sumSquares = 0;
+    int count = 0;
+    for (int i = 44; i < wavBytes.length - 1; i += 2) {
+      int sample = (wavBytes[i + 1] << 8) | wavBytes[i];
+      if (sample > 32767) sample -= 65536; // signed変換
+      sumSquares += sample * sample;
+      count++;
+    }
+    if (count == 0) return false;
+    final rms = sqrt(sumSquares / count);
+    return rms > 300; // 300未満は無音/ノイズ、300以上は声と判定
   }
 
   /// WAL .binファイルのフォーマット: [uint32_LE(フレームサイズ)][フレームバイト列] の繰り返し
