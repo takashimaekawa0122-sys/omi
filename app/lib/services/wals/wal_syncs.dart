@@ -207,6 +207,9 @@ class WalSyncs implements IWalSync {
     Logger.debug("WalSyncs: Phase 1a - Downloading SD card data to phone");
     DebugLogManager.logInfo('Sync Phase 1a: Downloading SD card data to phone');
     progress?.onWalSyncedProgress(0.0, phase: SyncPhase.downloadingFromDevice);
+    // AISA: setDevice()はasync voidのため、onDeviceConnectedと競合する場合がある。
+    // ここで必ず最新のペンダントストレージ状態を取得し直す。
+    await _sdcardSync.start();
     final missingSDCardWals = (await _sdcardSync.getMissingWals()).where((w) => w.status == WalStatus.miss).toList();
 
     bool usedWifi = false;
@@ -233,6 +236,8 @@ class WalSyncs implements IWalSync {
     // Phase 1b: Download flash page data to phone
     Logger.debug("WalSyncs: Phase 1b - Downloading flash page data to phone");
     DebugLogManager.logInfo('Sync Phase 1b: Downloading flash page data to phone');
+    // AISA: 同上 - 最新状態を取得してから同期
+    await _flashPageSync.start();
     await _flashPageSync.syncAll(progress: progress);
 
     if (_isCancelled) {
