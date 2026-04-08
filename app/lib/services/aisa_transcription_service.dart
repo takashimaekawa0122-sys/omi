@@ -9,7 +9,6 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
-import 'package:omi/env/env.dart';
 import 'package:omi/services/aisa_firestore_service.dart';
 
 class AisaTranscriptionService {
@@ -17,16 +16,12 @@ class AisaTranscriptionService {
   static final AisaTranscriptionService instance = AisaTranscriptionService._();
 
   static const _endpoint = 'https://api.aqua.sh/v1/audio/transcriptions';
+  static const _avalonApiKey = 'ava_T36UOxfEN_QUrpg2V-l6fzhZfplNoCFJUHLwAylKzrY';
 
   /// 音声ファイルを文字起こししてFirestoreに保存し、テキストを返す
   Future<String?> processAndSave(File wavFile) async {
     try {
-      final apiKey = Env.avalonApiKey;
-      if (apiKey == null || apiKey.isEmpty) {
-        debugPrint('[AISA] AVALON_API_KEY が未設定のためスキップ');
-        await AisaFirestoreService.instance.saveTranscript('[診断] APIキー未設定のためAvalonスキップ');
-        return null;
-      }
+      const apiKey = _avalonApiKey;
       await AisaFirestoreService.instance.saveTranscript('[診断] APIキー確認OK length=${apiKey.length} prefix=${apiKey.substring(0, 8)}');
 
       final transcript = await _transcribe(wavFile, apiKey);
