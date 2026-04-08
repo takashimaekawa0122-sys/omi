@@ -806,7 +806,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          const SizedBox.shrink(), // BatteryInfoWidget: デバイス不使用のため非表示
+          const BatteryInfoWidget(),
           const SizedBox.shrink(),
           Row(
             children: [
