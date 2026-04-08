@@ -24,8 +24,10 @@ class AisaTranscriptionService {
       final apiKey = Env.avalonApiKey;
       if (apiKey == null || apiKey.isEmpty) {
         debugPrint('[AISA] AVALON_API_KEY が未設定のためスキップ');
+        await AisaFirestoreService.instance.saveTranscript('[診断] APIキー未設定のためAvalonスキップ');
         return null;
       }
+      await AisaFirestoreService.instance.saveTranscript('[診断] APIキー確認OK length=${apiKey.length} prefix=${apiKey.substring(0, 8)}');
 
       final transcript = await _transcribe(wavFile, apiKey);
       if (transcript != null && transcript.trim().isNotEmpty) {
@@ -36,6 +38,7 @@ class AisaTranscriptionService {
       return null;
     } catch (e) {
       debugPrint('[AISA] 文字起こし処理失敗: $e');
+      await AisaFirestoreService.instance.saveTranscript('[診断] processAndSave例外: $e');
       return null;
     } finally {
       try {
