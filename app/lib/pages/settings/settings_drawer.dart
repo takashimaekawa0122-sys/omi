@@ -337,8 +337,21 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
                     );
                   },
                 ),
-                // Offline Sync: デバイス不使用のため非表示
-                const SizedBox.shrink(),
+                const Divider(height: 1, color: Color(0xFF3C3C43)),
+                Consumer<DeviceProvider>(
+                  builder: (context, deviceProvider, child) {
+                    return _buildSettingsItem(
+                      title: context.l10n.offlineSync,
+                      icon: const FaIcon(FontAwesomeIcons.arrowsRotate, color: Color(0xFF8E8E93), size: 20),
+                      onTap: () {
+                        final page = deviceProvider.supportsMultiFileSync
+                            ? const AutoSyncPage()
+                            : const SyncPage();
+                        Navigator.of(context).push(MaterialPageRoute(builder: (context) => page));
+                      },
+                    );
+                  },
+                ),
                 Consumer<DeviceProvider>(
                   builder: (context, deviceProvider, child) {
                     if (!deviceProvider.isConnected) {
