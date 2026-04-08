@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/conversation.dart';
+import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/services/aisa_offline_sync_service.dart';
 import 'package:omi/services/services.dart';
 import 'package:omi/services/wals.dart';
@@ -20,6 +21,10 @@ enum WalStatusFilter { pending, synced }
 class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSyncProgressListener {
   // Services
   final AudioPlayerUtils _audioPlayerUtils = AudioPlayerUtils.instance;
+
+  // AISA: SDカード転送中に音声ストリーミングを止めるためCaptureProviderを保持
+  CaptureProvider? _captureProvider;
+  void setCaptureProvider(CaptureProvider? provider) { _captureProvider = provider; }
 
   // WAL management
   List<Wal> _allWals = [];
@@ -247,10 +252,27 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
     _updateSyncState(_syncState.toIdle());
     _totalWalsToProcess = missingWals.length;
     _walsProcessedCount = 0;
-    await _performSync(
-      operation: () => _walService.getSyncs().syncAll(progress: this, connectionListener: connectionListener),
-      context: 'sync all WALs',
-    );
+
+    // AISA: SDカード転送中はBLE帯域を占有するため音声ストリーミングを一時停止する。
+    // ペンダントは音声ストリーミングとファイル転送を同時に処理できないため
+    // タイムアウトエラーが発生していた。
+    final wasStreaming = _captureProvider != null;
+    if (wasStreaming) {
+      Logger.debug('[AISA] SDカード同期前に音声ストリーミングを一時停止');
+      await _captureProvider!.stopStreamDeviceRecording();
+    }
+
+    try {
+      await _performSync(
+        operation: () => _walService.getSyncs().syncAll(progress: this, connectionListener: connectionListener),
+        context: 'sync all WALs',
+      );
+    } finally {
+      if (wasStreaming) {
+        Logger.debug('[AISA] SDカード同期後に音声ストリーミングを再開');
+        await _captureProvider!.streamDeviceRecording();
+      }
+    }
   }
 
   /// AISA自動同期用：BLEモード固定でSDカードデータをダウンロードする

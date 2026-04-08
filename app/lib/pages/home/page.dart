@@ -90,6 +90,8 @@ class _HomePageWrapperState extends State<HomePageWrapper> {
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       if (mounted) {
         context.read<DeviceProvider>().initiateConnection('HomePageWrapper', boundDeviceOnly: true);
+        // AISA: SDカード転送中に音声ストリーミングを一時停止できるよう紐付け
+        context.read<SyncProvider>().setCaptureProvider(context.read<CaptureProvider>());
       }
       // Check actual system permission state — the SharedPreferences flag may
       // be stale (e.g. user granted via Settings > Permissions, or reinstall).
