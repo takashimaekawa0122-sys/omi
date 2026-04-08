@@ -8,6 +8,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+import 'package:http/io_client.dart';
 
 import 'package:omi/services/aisa_firestore_service.dart';
 
@@ -51,8 +52,14 @@ class AisaTranscriptionService {
     request.fields['language'] = 'ja';
     request.files.add(await http.MultipartFile.fromPath('file', wavFile.path));
 
-    final streamedResponse = await request.send();
+    // SSL証明書検証をスキップするカスタムクライアント（api.aqua.sh対応）
+    final httpClient = HttpClient()
+      ..badCertificateCallback = (cert, host, port) => true;
+    final ioClient = IOClient(httpClient);
+
+    final streamedResponse = await ioClient.send(request);
     final body = await streamedResponse.stream.bytesToString();
+    ioClient.close();
 
     if (streamedResponse.statusCode != 200) {
       debugPrint('[AISA] Avalon API エラー ${streamedResponse.statusCode}: $body');
