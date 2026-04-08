@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/services/aisa_offline_sync_service.dart';
 import 'package:omi/services/services.dart';
@@ -250,6 +251,21 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
       operation: () => _walService.getSyncs().syncAll(progress: this, connectionListener: connectionListener),
       context: 'sync all WALs',
     );
+  }
+
+  /// AISA自動同期用：BLEモード固定でSDカードデータをダウンロードする
+  /// 自動同期はBLEで行う（WiFiはタイムアウトリスクがあるため）
+  /// デバイス接続時・アプリ起動時に自動呼び出しされる
+  Future<void> syncWalsViaBle() async {
+    final previousMethod = SharedPreferencesUtil().preferredSyncMethod;
+    // BLEモード固定で同期（WiFiタイムアウト回避）
+    SharedPreferencesUtil().preferredSyncMethod = 'ble';
+    try {
+      await syncWals();
+    } finally {
+      // 同期後に元の設定を復元（ユーザーの選択を変更しない）
+      SharedPreferencesUtil().preferredSyncMethod = previousMethod;
+    }
   }
 
   Future<void> syncWal(Wal wal, {IWifiConnectionListener? connectionListener}) async {

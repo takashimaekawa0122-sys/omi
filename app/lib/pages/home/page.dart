@@ -475,8 +475,25 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
         connectedDevice: deviceProvider.connectedDevice,
       );
 
-      // Register callback for device connection to check firmware announcements
-      deviceProvider.onDeviceConnected = _onDeviceConnectedForAnnouncements;
+      // Register callback for device connection:
+      // announcements チェック ＋ AISA自動BLE同期
+      final syncProvider = Provider.of<SyncProvider>(context, listen: false);
+      deviceProvider.onDeviceConnected = (BtDevice device) async {
+        // 既存: ファームウェアアナウンス確認
+        await _onDeviceConnectedForAnnouncements(device);
+        // AISA: デバイス接続時に自動でBLE同期を開始（ファームウェアバージョン不問）
+        if (!mounted) return;
+        if (!syncProvider.isSyncing) {
+          Logger.debug('[AISA] デバイス接続検知 → 自動BLE同期開始');
+          syncProvider.syncWalsViaBle();
+        }
+      };
+
+      // AISA: 起動時にデバイスが既に接続済みの場合も同期を開始（コールバック登録前に接続が完了していたケースに対応）
+      if (deviceProvider.isConnected && !syncProvider.isSyncing) {
+        Logger.debug('[AISA] 起動時デバイス接続済み → 自動BLE同期開始');
+        syncProvider.syncWalsViaBle();
+      }
     });
   }
 
@@ -485,10 +502,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
       if (!mounted) return;
       final deviceProvider = Provider.of<DeviceProvider>(context, listen: false);
       final syncProvider = Provider.of<SyncProvider>(context, listen: false);
+      // ファームウェア >= 3.0.17 のデバイスではファイル数検出後に呼ばれる
+      // BLE固定（WiFiはタイムアウトリスクあり）
       deviceProvider.onOfflineDataDetected = (device, fileCount, totalBytes) {
         if (!syncProvider.isSyncing) {
-          Logger.debug('HomePage: Auto-sync triggered ($fileCount files, $totalBytes bytes)');
-          syncProvider.syncWals();
+          Logger.debug('[AISA] オフラインデータ検知 ($fileCount件) → 自動BLE同期開始');
+          syncProvider.syncWalsViaBle();
         }
       };
     });
