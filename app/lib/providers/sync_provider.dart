@@ -145,26 +145,36 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
 
   void _initializeProvider() async {
     await refreshWals();
-    _autoUploadPendingPhoneFiles();
+    // 起動時：前セッションでディスクに残ったWALを処理
+    await _triggerAisaOfflineSyncIfNeeded();
   }
 
+  bool _isAisaSyncing = false;
   bool _isAutoUploading = false;
 
-  /// アプリ起動時にペンダントのオフライン録音をGroq Whisperで文字起こしする（AISA Phase 2）
-  /// 元のOmiクラウドへのアップロードの代わりにAISAオフライン同期を実行する
-  void _autoUploadPendingPhoneFiles() async {
-    await Future.delayed(const Duration(seconds: 3));
-    if (_syncState.isProcessing) return;
-    if (_walService.getSyncs().isStorageSyncing || _walService.getSyncs().isSdCardSyncing) return;
-    final phoneWals = _allWals
-        .where((w) => w.status == WalStatus.miss && (w.storage == WalStorage.disk || w.storage == WalStorage.mem))
-        .toList();
-    if (phoneWals.isEmpty) return;
+  /// AISA Phase 2: ディスク上の未同期WALをGroq Whisperで文字起こしする
+  /// 起動時 & WAL追加時（SDカードダウンロード完了後など）に呼ばれる
+  Future<void> _triggerAisaOfflineSyncIfNeeded() async {
+    if (_isAisaSyncing) return;
 
-    Logger.debug('[AISA Offline] ${phoneWals.length}件のオフライン録音をGroq Whisperで処理');
-    final phoneSync = _walService.getSyncs().phone as LocalWalSyncImpl;
-    await AisaOfflineSyncService.instance.syncPendingWals(phoneWals, phoneSync);
-    await refreshWals();
+    // ディスク上の未同期WALのみ対象（メモリはライブ録音が処理中）
+    final pendingWals = _allWals
+        .where((w) => w.status == WalStatus.miss && w.storage == WalStorage.disk)
+        .toList();
+    if (pendingWals.isEmpty) return;
+
+    _isAisaSyncing = true;
+    try {
+      Logger.debug('[AISA Offline] ${pendingWals.length}件のオフライン録音をGroq Whisperで処理開始');
+      final phoneSync = _walService.getSyncs().phone as LocalWalSyncImpl;
+      await AisaOfflineSyncService.instance.syncPendingWals(pendingWals, phoneSync);
+      await refreshWals();
+      Logger.debug('[AISA Offline] オフライン同期完了');
+    } catch (e) {
+      Logger.debug('[AISA Offline] オフライン同期エラー: $e');
+    } finally {
+      _isAisaSyncing = false;
+    }
   }
 
   /// Cancel auto-upload if running. Called before device-triggered sync.
@@ -404,6 +414,8 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
   @override
   void onWalUpdated() async {
     await refreshWals();
+    // SDカードダウンロード完了など、WALが追加されるたびにAISA同期をトリガー
+    await _triggerAisaOfflineSyncIfNeeded();
   }
 
   @override

@@ -123,6 +123,10 @@ class CaptureProvider extends ChangeNotifier
   final List<List<int>> _aisaFrameBuffer = [];
   BleAudioCodec _aisaCodec = BleAudioCodec.pcm16;
 
+  // AISA: オフライン同期トランスクリプトのバッファ
+  // conversationProvider が未初期化の場合はここに蓄積し、初期化後にまとめて追加する
+  final List<String> _pendingOfflineTranscripts = [];
+
   bool _isLoadingInProgressConversation = false;
 
   // BLE streaming metrics
@@ -171,9 +175,15 @@ class CaptureProvider extends ChangeNotifier
       onConnectionStateChanged(isConnected);
     });
     // AISA: オフライン同期で生成されたトランスクリプトを会話リストに追加
+    // conversationProviderが未初期化の場合はバッファに積んでおく
     _aisaOfflineSubscription =
         AisaOfflineSyncService.instance.transcriptStream.listen((transcript) {
-      _addAisaConversation(transcript);
+      if (conversationProvider != null) {
+        _addAisaConversation(transcript);
+      } else {
+        _pendingOfflineTranscripts.add(transcript);
+        Logger.debug('[AISA Offline] conversationProvider未初期化のためバッファに積む: $transcript');
+      }
     });
   }
 
@@ -182,6 +192,15 @@ class CaptureProvider extends ChangeNotifier
     messageProvider = mp;
     peopleProvider = pp;
     usageProvider = up;
+
+    // conversationProviderが初期化されたタイミングでオフライン同期バッファを吐き出す
+    if (cp != null && _pendingOfflineTranscripts.isNotEmpty) {
+      Logger.debug('[AISA Offline] バッファの${_pendingOfflineTranscripts.length}件を会話リストに追加');
+      for (final transcript in _pendingOfflineTranscripts) {
+        _addAisaConversation(transcript);
+      }
+      _pendingOfflineTranscripts.clear();
+    }
 
     notifyListeners();
   }
