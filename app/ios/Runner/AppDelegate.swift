@@ -242,6 +242,15 @@ extension FlutterError: Error {}
       completionHandler(exportedMappings.isEmpty ? .noData : .newData)
   }
 
+  override func applicationDidEnterBackground(_ application: UIApplication) {
+    super.applicationDidEnterBackground(application)
+    // アプリがバックグラウンドに入るたびにBLEを明示的に切断。
+    // これにより didDisconnectPeripheral で isManual=true となり自動再接続が抑制され、
+    // ペンダントがBLE切断を検知してSDカード録音モードに移行できる。
+    NSLog("[AISA] applicationDidEnterBackground → disconnectAllPeripherals")
+    OmiBleManager.shared.disconnectAllPeripherals()
+  }
+
   override func applicationWillTerminate(_ application: UIApplication) {
     OmiBleManager.shared.disconnectAllPeripherals()
 
