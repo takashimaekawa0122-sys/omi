@@ -383,9 +383,16 @@ class CaptureProvider extends ChangeNotifier
     _transcriptServiceReady = true;
     if (_sessionStartSeconds == 0) {
       _sessionStartSeconds = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-      WidgetsBinding.instance.addObserver(this); // バックグラウンド検知を登録
+      WidgetsBinding.instance.addObserver(this);
+      // 【診断】Firestore書き込みテスト（起動時に1回だけ実行）
+      AisaFirestoreService.instance.saveTranscript('[AISA起動テスト] ${DateTime.now()}').then((_) {
+        Logger.debug('[AISA] Firestore書き込みテスト: 成功');
+      }).catchError((e) {
+        Logger.debug('[AISA] Firestore書き込みテスト: 失敗 $e');
+      });
     }
     _aisaTimer ??= Timer.periodic(const Duration(seconds: 5), (_) {
+      Logger.debug('[AISA] タイマー発火 バッファ=${_aisaFrameBuffer.length}フレーム');
       _triggerAisaTranscription();
     });
     notifyListeners();
