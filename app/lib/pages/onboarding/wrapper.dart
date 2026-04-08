@@ -278,7 +278,7 @@ class _OnboardingWrapperState extends State<OnboardingWrapper> with TickerProvid
       ),
       PrimaryLanguageWidget(
         goNext: () {
-          _goNext(); // Go to Found Omi page
+          _controller!.animateTo(kPermissionsPage); // Found Omiをスキップ
           MixpanelManager().onboardingStepCompleted('Primary Language');
         },
       ),
@@ -437,6 +437,8 @@ class _OnboardingWrapperState extends State<OnboardingWrapper> with TickerProvid
                                   if (_controller!.index == kSpeechProfilePage) {
                                     _speechProfileProvider?.close();
                                     _controller!.animateTo(kUserReviewPage);
+                                  } else if (_controller!.index == kPermissionsPage) {
+                                    _controller!.animateTo(kPrimaryLanguagePage); // Found Omiを飛ばして戻る
                                   } else if (_controller!.index > kNamePage) {
                                     _controller!.animateTo(_controller!.index - 1);
                                   }
@@ -516,6 +518,8 @@ class _OnboardingWrapperState extends State<OnboardingWrapper> with TickerProvid
                                     if (_controller!.index == kSpeechProfilePage) {
                                       _speechProfileProvider?.close();
                                       _controller!.animateTo(kUserReviewPage);
+                                    } else if (_controller!.index == kPermissionsPage) {
+                                      _controller!.animateTo(kPrimaryLanguagePage); // Found Omiを飛ばして戻る
                                     } else if (_controller!.index > kNamePage) {
                                       _controller!.animateTo(_controller!.index - 1);
                                     }

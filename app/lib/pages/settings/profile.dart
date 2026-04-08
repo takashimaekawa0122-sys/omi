@@ -187,28 +187,8 @@ class _ProfilePageState extends State<ProfilePage> {
             ),
             const SizedBox(height: 32),
 
-            // VOICE & PEOPLE SECTION
-            _buildSectionContainer(
-              children: [
-                _buildProfileItem(
-                  title: context.l10n.speechProfile,
-                  icon: const FaIcon(FontAwesomeIcons.microphone, color: Color(0xFF8E8E93), size: 20),
-                  onTap: () {
-                    routeToPage(context, const SpeechProfilePage());
-                    MixpanelManager().pageOpened('Profile Speech Profile');
-                  },
-                ),
-                const Divider(height: 1, color: Color(0xFF3C3C43)),
-                _buildProfileItem(
-                  title: context.l10n.identifyingOthers,
-                  icon: const FaIcon(FontAwesomeIcons.users, color: Color(0xFF8E8E93), size: 20),
-                  onTap: () {
-                    routeToPage(context, const UserPeoplePage());
-                  },
-                ),
-              ],
-            ),
-            const SizedBox(height: 32),
+            // VOICE & PEOPLE SECTION: デバイス不使用のため非表示
+            const SizedBox.shrink(),
 
             // PAYMENT & PRIVACY SECTION
             _buildSectionContainer(
