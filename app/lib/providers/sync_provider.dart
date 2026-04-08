@@ -160,9 +160,11 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
 
     _isAisaSyncing = true;
     try {
+      // 最初に一度だけ最新WALリストを取得
+      await refreshWals();
+
       // 処理が完了してもまだ pending がある限りループ（チャンク逐次到着に対応）
       while (true) {
-        await refreshWals();
         final pendingWals = _allWals
             .where((w) => w.status == WalStatus.miss && w.storage == WalStorage.disk)
             .toList();
@@ -171,11 +173,23 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
         Logger.debug('[AISA Offline] ${pendingWals.length}件のオフライン録音をGroq Whisperで処理');
         final phoneSync = _walService.getSyncs().phone as LocalWalSyncImpl;
         await AisaOfflineSyncService.instance.syncPendingWals(pendingWals, phoneSync);
+
+        // 処理後に再取得してまだpendingが残っていないか確認
+        await refreshWals();
       }
       Logger.debug('[AISA Offline] オフライン同期完了');
     } catch (e) {
       Logger.debug('[AISA Offline] オフライン同期エラー: $e');
     } finally {
+      _isAisaSyncing = false;
+    }
+  }
+
+  /// AISA同期を中断する（手動同期開始時など）
+  void _cancelAisaSyncIfNeeded() {
+    if (_isAisaSyncing) {
+      Logger.debug('[AISA Offline] 手動同期開始のためAISA同期を中断');
+      AisaOfflineSyncService.instance.cancelSync();
       _isAisaSyncing = false;
     }
   }
@@ -230,6 +244,7 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
 
   Future<void> syncWals({IWifiConnectionListener? connectionListener}) async {
     _cancelAutoUploadIfNeeded();
+    _cancelAisaSyncIfNeeded(); // AISA同期中なら中断してから手動同期を開始
     _updateSyncState(_syncState.toIdle());
     _totalWalsToProcess = missingWals.length;
     _walsProcessedCount = 0;

@@ -24,12 +24,29 @@ class AisaOfflineSyncService {
       StreamController<String>.broadcast();
   Stream<String> get transcriptStream => _transcriptController.stream;
 
+  bool _isCancelled = false;
+
+  /// 進行中の同期を中断する（手動同期開始時にSyncProviderから呼ばれる）
+  void cancelSync() {
+    _isCancelled = true;
+    debugPrint('[AISA Offline] キャンセルリクエスト受信');
+  }
+
   /// 未同期のWAL（ディスク上の.binファイル）をGroq Whisperで処理する
   /// SyncProviderの_triggerAisaOfflineSyncIfNeeded()から呼ばれる
   Future<void> syncPendingWals(
     List<Wal> pendingWals,
     LocalWalSyncImpl phoneSync,
   ) async {
+    _isCancelled = false; // 新規実行開始時にリセット
+
+    // APIキー未設定の早期検出
+    const groqApiKey = String.fromEnvironment('GROQ_API_KEY');
+    if (groqApiKey.isEmpty) {
+      debugPrint('[AISA Offline] GROQ_API_KEY未設定のためオフライン同期をスキップ');
+      return;
+    }
+
     final diskWals = pendingWals
         .where((w) => w.storage == WalStorage.disk && w.filePath != null)
         .toList();
@@ -54,6 +71,12 @@ class AisaOfflineSyncService {
     int successCount = 0;
     int failCount = 0;
     for (int i = 0; i < diskWals.length; i++) {
+      // キャンセルチェック（手動同期開始時などに中断）
+      if (_isCancelled) {
+        debugPrint('[AISA Offline] キャンセルにより中断（処理済み: $i/${diskWals.length}）');
+        break;
+      }
+
       final wal = diskWals[i];
       try {
         final transcript = await _processWal(wal);
@@ -67,7 +90,7 @@ class AisaOfflineSyncService {
       }
 
       // 最後の1件以外は3秒待機してレート制限を回避
-      if (i < diskWals.length - 1) {
+      if (i < diskWals.length - 1 && !_isCancelled) {
         await Future.delayed(const Duration(seconds: 3));
       }
     }
