@@ -340,6 +340,11 @@ class SDCardWalSyncImpl implements SDCardWalSync {
     // アイドルタイマー: デバイスが0x00（準備OK）を送った後にデータが来なくなった場合に検出する
     // 初回タイムアウト（5秒）はキャンセルされるが、その後データが途絶えた場合はこちらが発火
     Timer? inactivityTimer;
+    // リトライ機構: 0x00（準備OK）を受け取ったがデータが来ない場合、書き込みコマンドを再送する
+    // SDカードのシーク遅延やバッファ問題でデータ送信が止まる場合に有効
+    int readRetryCount = 0;
+    const maxReadRetries = 3;
+    Timer? dataStartTimer;
 
     void _resetInactivityTimer() {
       inactivityTimer?.cancel();
@@ -375,6 +380,33 @@ class SDCardWalSyncImpl implements SDCardWalSync {
           Logger.debug('returned $value');
           if (value[0] == 0) {
             Logger.debug('good to go');
+            // 0x00（準備OK）を受け取ったが実データが来ない場合のリトライタイマー
+            // SDカードのシーク遅延やファームウェアの一時停止で発生する
+            dataStartTimer?.cancel();
+            dataStartTimer = Timer(const Duration(seconds: 10), () async {
+              if (bytesData.isEmpty && !completer.isCompleted && !hasError) {
+                if (readRetryCount < maxReadRetries) {
+                  readRetryCount++;
+                  Logger.debug(
+                    'SD card: 0x00後にデータなし - 読み取りコマンドを再送 (試行 $readRetryCount/$maxReadRetries)',
+                  );
+                  DebugLogManager.logWarning('SD card BLE: retrying read command', {
+                    'retry': readRetryCount,
+                    'maxRetries': maxReadRetries,
+                    'offset': offset,
+                  });
+                  await _writeToStorage(deviceId, fileNum, 0, offset);
+                } else {
+                  hasError = true;
+                  Logger.debug('SD card: リトライ上限 ($maxReadRetries回) に達しました');
+                  if (!completer.isCompleted) {
+                    completer.completeError(
+                      TimeoutException('SD card did not send data after $maxReadRetries retries'),
+                    );
+                  }
+                }
+              }
+            });
           } else if (value[0] == 3) {
             Logger.debug('bad file size. finishing...');
           } else if (value[0] == 4) {
@@ -439,7 +471,8 @@ class SDCardWalSyncImpl implements SDCardWalSync {
     } finally {
       await _storageStream?.cancel();
       timeoutTimer.cancel();
-      inactivityTimer?.cancel(); // アイドルタイマーも必ずキャンセル
+      inactivityTimer?.cancel();  // アイドルタイマーも必ずキャンセル
+      dataStartTimer?.cancel();   // リトライタイマーも必ずキャンセル
     }
 
     // After download: compute accurate duration from actual frame count
