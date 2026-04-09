@@ -71,48 +71,60 @@ class AisaOfflineSyncService {
     }
 
     // Groq Whisperで文字起こし（synced済みマーク後なのでOmiには送られない）
-    // Groqレート制限: free tier 20 req/min → 最低5秒間隔で送信（長い録音でもレート制限を回避）
-    // 各チャンクのテキストを収集し、同一録音セッションごとに結合して1件として保存する
+    // Groqレート制限: free tier 20 req/min → 最低5秒間隔で送信
+    //
+    // 【設計方針】セッション単位で処理することで2つのバグを防ぐ：
+    //   Bug1: diskWalsは時系列順とは限らないため、先にセッション分割（内部でtimerStart昇順ソート済み）
+    //   Bug2: previousTranscriptがセッション境界をまたがないようセッション毎にリセット
     int successCount = 0;
     int skipCount = 0;
     int failCount = 0;
     final Map<String, String> walTranscripts = {}; // walId → transcript
-    String? previousTranscript; // 直前チャンクのテキスト（Whisperプロンプトへの文脈提供用）
 
-    for (int i = 0; i < diskWals.length; i++) {
-      // キャンセルチェック（手動同期開始時などに中断）
-      if (_isCancelled) {
-        debugPrint('[AISA Offline] キャンセルにより中断（処理済み: $i/${diskWals.length}）');
-        break;
-      }
+    // セッション分割（内部でtimerStart昇順ソート → 時系列順が保証される）
+    final sessions = _groupWalsBySession(diskWals);
 
-      final wal = diskWals[i];
-      try {
-        final transcript = await _transcribeWalOnly(wal, previousContext: previousTranscript);
-        if (transcript == null) {
-          skipCount++; // 無音またはデコード失敗
-          // 無音チャンクの場合は文脈をリセット（別の話題の可能性）
-          previousTranscript = null;
-        } else if (transcript.trim().isNotEmpty) {
-          walTranscripts[wal.id] = transcript.trim();
-          successCount++;
-          // 次のチャンクのWhisperプロンプトに渡す文脈を更新
-          previousTranscript = transcript.trim();
+    int processedCount = 0; // 全チャンクを通じたカウンター（レート制限タイミング用）
+
+    for (final sessionWals in sessions) {
+      // セッションをまたぐ文脈の汚染を防ぐため、セッション毎にリセット
+      String? previousTranscript;
+
+      for (final wal in sessionWals) {
+        // キャンセルチェック（手動同期開始時などに中断）
+        if (_isCancelled) {
+          debugPrint('[AISA Offline] キャンセルにより中断（処理済み: $processedCount/${diskWals.length}）');
+          break;
         }
-      } catch (e) {
-        debugPrint('[AISA Offline] WAL文字起こし失敗 ${wal.id}: $e');
-        failCount++;
+
+        try {
+          final transcript = await _transcribeWalOnly(wal, previousContext: previousTranscript);
+          if (transcript == null) {
+            skipCount++; // 無音またはデコード失敗
+            previousTranscript = null; // 無音は文脈をリセット（話題の区切りの可能性）
+          } else if (transcript.trim().isNotEmpty) {
+            walTranscripts[wal.id] = transcript.trim();
+            successCount++;
+            previousTranscript = transcript.trim(); // 次のチャンクへ文脈を引き継ぐ
+          }
+        } catch (e) {
+          debugPrint('[AISA Offline] WAL文字起こし失敗 ${wal.id}: $e');
+          failCount++;
+          // 失敗時はpreviousTranscriptをそのまま維持（直前の成功チャンクの文脈を保持）
+        }
+
+        processedCount++;
+        // 最後のチャンク以外は5秒待機してレート制限を回避
+        if (processedCount < diskWals.length && !_isCancelled) {
+          await Future.delayed(const Duration(seconds: 5));
+        }
       }
 
-      // 最後の1件以外は5秒待機してレート制限を回避（3秒→5秒: 長い録音でも安全）
-      if (i < diskWals.length - 1 && !_isCancelled) {
-        await Future.delayed(const Duration(seconds: 5));
-      }
+      if (_isCancelled) break;
     }
 
     // 同一録音セッションのチャンクを結合して1件の会話として保存
     // キャンセル済みでも収集済みのテキストは保存する（途中までの内容を失わないため）
-    final sessions = _groupWalsBySession(diskWals);
     int savedSessions = 0;
     for (final sessionWals in sessions) {
       final transcripts = sessionWals
