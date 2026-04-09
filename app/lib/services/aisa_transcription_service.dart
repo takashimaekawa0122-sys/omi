@@ -53,6 +53,12 @@ class AisaTranscriptionService {
   }
 
   Future<String?> _transcribe(File wavFile, {String? previousContext}) async {
+    // APIキー未設定チェック（ビルド時に--dart-define=GROQ_API_KEY=...が必要）
+    if (_groqApiKey.isEmpty) {
+      debugPrint('[AISA] ⚠️ GROQ_API_KEY未設定！build.sh を使ってリビルドしてください。文字起こし不可。');
+      return null;
+    }
+
     final fileSize = await wavFile.length();
     debugPrint('[AISA] Groq送信: ${wavFile.path} (${(fileSize / 1024).toStringAsFixed(0)}KB)');
 

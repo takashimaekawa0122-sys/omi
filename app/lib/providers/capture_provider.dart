@@ -1315,13 +1315,17 @@ class CaptureProvider extends ChangeNotifier
     if (_aisaFrameBuffer.isEmpty) return;
     final frames = List<List<int>>.from(_aisaFrameBuffer);
     _aisaFrameBuffer.clear();
+    Logger.debug('[AISA] 文字起こし開始: ${frames.length}フレーム (codec: $_aisaCodec)');
     try {
       final wavUtil = WavBytesUtil(codec: _aisaCodec, framesPerSecond: _aisaCodec.getFramesPerSecond());
       final wavFile = await wavUtil.createWavByCodec(frames,
           filename: 'aisa_${DateTime.now().millisecondsSinceEpoch}.wav');
 
       // 無音検出: 声が含まれていない場合はAPIを呼ばない
-      if (!_hasVoiceActivity(await wavFile.readAsBytes())) {
+      // 閾値100: ペンダント型マイクは近距離のため感度良好（オフライン同期は50、リアルタイムは100で余裕を持たせる）
+      final wavBytes = await wavFile.readAsBytes();
+      if (!_hasVoiceActivity(wavBytes)) {
+        Logger.debug('[AISA] VADスキップ: 無音と判定 (${wavBytes.length}bytes)');
         await wavFile.delete();
         return;
       }
@@ -1329,6 +1333,8 @@ class CaptureProvider extends ChangeNotifier
       final transcript = await AisaTranscriptionService.instance.processAndSave(wavFile);
       if (transcript != null && transcript.trim().isNotEmpty) {
         _addAisaConversation(transcript);
+      } else {
+        Logger.debug('[AISA] 文字起こし結果なし（無音 or Groqエラー）');
       }
     } catch (e) {
       Logger.debug('[AISA] 音声処理失敗: $e');
@@ -1349,7 +1355,8 @@ class CaptureProvider extends ChangeNotifier
     }
     if (count == 0) return false;
     final rms = sqrt(sumSquares / count);
-    return rms > 300; // 300未満は無音/ノイズ、300以上は声と判定
+    Logger.debug('[AISA VAD] RMS=$rms');
+    return rms > 100; // 100未満は無音/ノイズ（ペンダントマイクは近距離のため100で十分）
   }
 
   // AISA: 会話ID生成用カウンター（同一ミリ秒での重複IDを防ぐ）
