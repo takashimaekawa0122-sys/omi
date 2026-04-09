@@ -345,20 +345,49 @@ class SDCardWalSyncImpl implements SDCardWalSync {
     int readRetryCount = 0;
     const maxReadRetries = 3;
     Timer? dataStartTimer;
+    // AISA: 転送途中でペンダントが送信を止めた場合のリカバリー
+    // ペンダントのファームウェアがセッション制限で止まることがある
+    // → 現在のoffsetで読み取りコマンドを再送することで転送を再開できる
+    int midTransferRetryCount = 0;
+    const maxMidTransferRetries = 3;
 
     void _resetInactivityTimer() {
       inactivityTimer?.cancel();
       if (!completer.isCompleted) {
-        // 非アクティブタイムアウト: 120秒（旧30秒）
-        // 24分超の大容量データ転送中にペンダントが一時停止しても継続できるよう延長
-        inactivityTimer = Timer(const Duration(seconds: 120), () {
-          if (!completer.isCompleted) {
-            hasError = true;
-            Logger.debug('SD card BLE inactivity timeout: no data for 120s after handshake');
-            DebugLogManager.logWarning('SD card BLE inactivity: device stopped responding', {'offset': offset});
-            completer.completeError(
-              TimeoutException('SD card stopped sending data after 120 seconds'),
+        // データが既に受信されている場合: 30秒で中断を検知し再送コマンドを試みる
+        // データ未受信の場合: 120秒（dataStartTimerが10秒で先に対応するため）
+        final timeout = bytesData.isNotEmpty
+            ? const Duration(seconds: 30)
+            : const Duration(seconds: 120);
+
+        inactivityTimer = Timer(timeout, () async {
+          if (completer.isCompleted || hasError) return;
+
+          if (bytesData.isNotEmpty && midTransferRetryCount < maxMidTransferRetries) {
+            // 転送途中でデータが止まった → 現在のoffsetで読み取りコマンドを再送
+            midTransferRetryCount++;
+            Logger.debug(
+              '[AISA] 転送中断検知 - 読み取りコマンド再送 (offset=$offset, frames=${bytesData.length}, retry=$midTransferRetryCount/$maxMidTransferRetries)',
             );
+            DebugLogManager.logWarning('SD card BLE: mid-transfer inactivity, re-commanding pendant', {
+              'retry': midTransferRetryCount,
+              'maxRetries': maxMidTransferRetries,
+              'offset': offset,
+              'framesReceived': bytesData.length,
+            });
+            await _writeToStorage(deviceId, fileNum, 0, offset);
+            _resetInactivityTimer(); // 再送後に再びタイマーをセット
+          } else {
+            hasError = true;
+            final msg = bytesData.isNotEmpty
+                ? 'SD card stopped sending data (retried $midTransferRetryCount/$maxMidTransferRetries times)'
+                : 'SD card stopped sending data after ${timeout.inSeconds} seconds';
+            Logger.debug('SD card BLE inactivity timeout: $msg');
+            DebugLogManager.logWarning('SD card BLE inactivity: device stopped responding', {
+              'offset': offset,
+              'midTransferRetries': midTransferRetryCount,
+            });
+            completer.completeError(TimeoutException(msg));
           }
         });
       }
@@ -532,11 +561,45 @@ class SDCardWalSyncImpl implements SDCardWalSync {
     bool hasError = false;
     bool firstDataReceived = false;
     Timer? timeoutTimer;
+    // AISA: 転送途中でペンダントが送信を止めた場合のリカバリー（WithMarkersモード）
+    Timer? inactivityTimer;
+    int midTransferRetryCount = 0;
+    const maxMidTransferRetries = 3;
+
+    void _resetInactivityTimerMarkers() {
+      inactivityTimer?.cancel();
+      if (!completer.isCompleted) {
+        final timeout = bytesData.isNotEmpty
+            ? const Duration(seconds: 30)
+            : const Duration(seconds: 120);
+        inactivityTimer = Timer(timeout, () async {
+          if (completer.isCompleted || hasError) return;
+          if (bytesData.isNotEmpty && midTransferRetryCount < maxMidTransferRetries) {
+            midTransferRetryCount++;
+            Logger.debug('[AISA] WithMarkers転送中断 - 読み取りコマンド再送 (offset=$offset, frames=${bytesData.length}, retry=$midTransferRetryCount/$maxMidTransferRetries)');
+            DebugLogManager.logWarning('SD card BLE WithMarkers: mid-transfer inactivity, re-commanding', {
+              'retry': midTransferRetryCount, 'offset': offset, 'frames': bytesData.length,
+            });
+            await _writeToStorage(deviceId, fileNum, 0, offset);
+            _resetInactivityTimerMarkers();
+          } else {
+            hasError = true;
+            final msg = bytesData.isNotEmpty
+                ? 'SD card stopped sending data (WithMarkers, retried $midTransferRetryCount/$maxMidTransferRetries times)'
+                : 'SD card stopped sending data after ${timeout.inSeconds} seconds';
+            Logger.debug('SD card BLE WithMarkers inactivity: $msg');
+            completer.completeError(TimeoutException(msg));
+          }
+        });
+      }
+    }
 
     _storageStream = await _getBleStorageBytesListener(
       deviceId,
       onStorageBytesReceived: (List<int> value) async {
         if (value.isEmpty || hasError) return;
+
+        _resetInactivityTimerMarkers();
 
         if (!firstDataReceived) {
           firstDataReceived = true;
@@ -686,6 +749,7 @@ class SDCardWalSyncImpl implements SDCardWalSync {
     } finally {
       await _storageStream?.cancel();
       timeoutTimer.cancel();
+      inactivityTimer?.cancel(); // AISA: アイドルタイマーも必ずキャンセル
     }
 
     // Flush remaining data, respecting any unprocessed timestamp markers
