@@ -76,20 +76,35 @@ class NativeBleTransport extends DeviceTransport {
     }
   }
 
-  /// SDカード同期前に全BLE通知を停止する。
-  /// Dartのstream.cancel()だけではネイティブ側のsubscribeが残るため、
-  /// ペンダントが音声データを送り続けBLE帯域を消費してしまう。
-  Future<void> pauseAllNotifications() async {
+  /// SDカード同期前に音声など非ストレージ系BLE通知を停止する。
+  /// ストレージ特性(30295780-...)はファイル転送に必要なため除外。
+  /// stream.cancel()だけではネイティブのsubscribeが残るため、
+  /// ここで明示的にunsubscribeし、コントローラも削除して再subscribe可能にする。
+  static const _storageServiceUuidPrefix = '30295780';
+
+  Future<void> pauseNonStorageNotifications() async {
+    final keysToRemove = <String>[];
     for (final key in _streamControllers.keys.toList()) {
       final parts = key.split(':');
-      if (parts.length == 2) {
-        try {
-          _hostApi.unsubscribeCharacteristic(_peripheralUuid, parts[0], parts[1]);
-        } catch (_) {}
-      }
+      if (parts.length != 2) continue;
+      final serviceUuid = parts[0];
+      // ストレージサービスは除外（ファイル転送で使用）
+      if (serviceUuid.startsWith(_storageServiceUuidPrefix.toLowerCase())) continue;
+      try {
+        _hostApi.unsubscribeCharacteristic(_peripheralUuid, parts[0], parts[1]);
+        keysToRemove.add(key);
+      } catch (_) {}
     }
-    Logger.debug('[NativeBleTransport] pauseAllNotifications: unsubscribed ${_streamControllers.length} characteristics');
+    // コントローラを削除 → 次回getCharacteristicStream()で新規subscribe可能になる
+    for (final key in keysToRemove) {
+      await _streamControllers[key]?.close();
+      _streamControllers.remove(key);
+    }
+    Logger.debug('[NativeBleTransport] pauseNonStorageNotifications: paused ${keysToRemove.length} characteristics (storage excluded)');
   }
+
+  // 旧メソッド（後方互換）
+  Future<void> pauseAllNotifications() => pauseNonStorageNotifications();
 
   @override
   Future<void> disconnect() async {
