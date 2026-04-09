@@ -129,8 +129,9 @@ class AisaOfflineSyncService {
       filename: 'aisa_offline_${wal.id}.wav',
     );
 
-    // VADチェック：無音・ノイズのみのWAVはGroqに送らずスキップ
-    // （ライブ録音と同じ閾値300を使用）
+    // VADチェック：完全な無音のみスキップ（閾値を低く設定）
+    // SDカード録音はユーザーが意図的に録音したものなので非常に寛容な閾値にする
+    // 閾値50: ほぼ無音（ホワイトノイズのみ）のチャンクだけスキップ
     final wavBytes = await wavFile.readAsBytes();
     if (!_hasVoiceActivity(wavBytes)) {
       await wavFile.delete();
@@ -164,7 +165,8 @@ class AisaOfflineSyncService {
     }
     if (count == 0) return false;
     final rms = sqrt(sumSquares / count);
-    return rms > 300; // 300未満は無音/ノイズ、300以上は声と判定
+    debugPrint('[AISA VAD] RMS=$rms (閾値50: これ以下は完全無音として除外)');
+    return rms > 50; // 300→50に引き下げ: SDカード録音は寛容に（ほぼ完全無音のみスキップ）
   }
 
   /// WAL .binファイルのフォーマット: [uint32_LE(フレームサイズ)][フレームバイト列] の繰り返し
