@@ -40,6 +40,21 @@ class AisaTranscriptionService {
     }
   }
 
+  /// 文字起こしのみ行い、Firestoreには保存しない
+  /// SDカード録音の複数チャンクをまとめて1件として保存するために使用
+  Future<String?> transcribeOnly(File wavFile) async {
+    try {
+      return await _transcribe(wavFile);
+    } catch (e) {
+      debugPrint('[AISA] 文字起こし失敗: $e');
+      return null;
+    } finally {
+      try {
+        if (await wavFile.exists()) await wavFile.delete();
+      } catch (_) {}
+    }
+  }
+
   Future<String?> _transcribe(File wavFile) async {
     final request = http.MultipartRequest('POST', Uri.parse(_endpoint));
     request.headers['Authorization'] = 'Bearer $_groqApiKey';

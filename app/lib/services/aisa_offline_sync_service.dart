@@ -11,6 +11,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 
+import 'package:omi/services/aisa_firestore_service.dart';
 import 'package:omi/services/aisa_transcription_service.dart';
 import 'package:omi/services/wals/local_wal_sync.dart';
 import 'package:omi/services/wals/wal.dart';
@@ -70,11 +71,13 @@ class AisaOfflineSyncService {
     }
 
     // Groq Whisperで文字起こし（synced済みマーク後なのでOmiには送られない）
-    // Groqレート制限: free tier 20 req/min → 最低3秒間隔で送信
-    // 大量WAL処理時に429エラーで全滅するのを防ぐ
+    // Groqレート制限: free tier 20 req/min → 最低5秒間隔で送信（長い録音でもレート制限を回避）
+    // 各チャンクのテキストを収集し、同一録音セッションごとに結合して1件として保存する
     int successCount = 0;
     int skipCount = 0;
     int failCount = 0;
+    final Map<String, String> walTranscripts = {}; // walId → transcript
+
     for (int i = 0; i < diskWals.length; i++) {
       // キャンセルチェック（手動同期開始時などに中断）
       if (_isCancelled) {
@@ -84,11 +87,11 @@ class AisaOfflineSyncService {
 
       final wal = diskWals[i];
       try {
-        final transcript = await _processWal(wal);
+        final transcript = await _transcribeWalOnly(wal);
         if (transcript == null) {
           skipCount++; // 無音またはデコード失敗
         } else if (transcript.trim().isNotEmpty) {
-          _transcriptController.add(transcript);
+          walTranscripts[wal.id] = transcript.trim();
           successCount++;
         }
       } catch (e) {
@@ -96,18 +99,39 @@ class AisaOfflineSyncService {
         failCount++;
       }
 
-      // 最後の1件以外は3秒待機してレート制限を回避
+      // 最後の1件以外は5秒待機してレート制限を回避（3秒→5秒: 長い録音でも安全）
       if (i < diskWals.length - 1 && !_isCancelled) {
-        await Future.delayed(const Duration(seconds: 3));
+        await Future.delayed(const Duration(seconds: 5));
       }
     }
 
-    debugPrint('[AISA Offline] ${diskWals.length}件処理完了 '
-        '(文字起こし成功: $successCount, 無音スキップ: $skipCount, 失敗: $failCount)');
+    // 同一録音セッションのチャンクを結合して1件の会話として保存
+    final sessions = _groupWalsBySession(diskWals);
+    int savedSessions = 0;
+    for (final sessionWals in sessions) {
+      final transcripts = sessionWals
+          .map((w) => walTranscripts[w.id])
+          .where((t) => t != null && t!.isNotEmpty)
+          .cast<String>()
+          .toList();
+
+      if (transcripts.isEmpty) continue;
+
+      final combined = transcripts.join(' ');
+      _transcriptController.add(combined);
+      await AisaFirestoreService.instance.saveTranscript(combined);
+      savedSessions++;
+      debugPrint('[AISA Offline] ${sessionWals.length}チャンクを1件の会話として保存 '
+          '(${combined.length}文字, ${sessionWals.first.timerStart})');
+    }
+
+    debugPrint('[AISA Offline] ${diskWals.length}チャンク処理完了 → $savedSessions件の会話として保存 '
+        '(成功: $successCount, スキップ: $skipCount, 失敗: $failCount)');
   }
 
-  /// WAL 1件を処理：.binファイル読み込み → フレームデコード → VAD → WAV変換 → Groq Whisper
-  Future<String?> _processWal(Wal wal) async {
+  /// WAL 1件を文字起こしのみ（Firestoreには保存しない）
+  /// 複数チャンクを結合して1件として保存するため、保存は呼び出し元に任せる
+  Future<String?> _transcribeWalOnly(Wal wal) async {
     final fullPath = await Wal.getFilePath(wal.filePath);
     if (fullPath == null) return null;
 
@@ -147,8 +171,42 @@ class AisaOfflineSyncService {
       return null;
     }
 
-    // Groq Whisper 文字起こし + Firestore保存
-    return await AisaTranscriptionService.instance.processAndSave(wavFile);
+    // Groq Whisper 文字起こしのみ（Firestoreには保存しない）
+    return await AisaTranscriptionService.instance.transcribeOnly(wavFile);
+  }
+
+  /// 同一録音セッションのWALをグループ化する
+  /// 連続する60秒チャンクを同一セッションと判定（65秒以内のギャップ、同一デバイス）
+  /// 例：20分録音 → 20チャンク → 1グループ → 1件の会話
+  List<List<Wal>> _groupWalsBySession(List<Wal> wals) {
+    if (wals.isEmpty) return [];
+
+    // timerStart順にソート
+    final sorted = [...wals]..sort((a, b) => a.timerStart.compareTo(b.timerStart));
+
+    final groups = <List<Wal>>[];
+    var currentGroup = [sorted[0]];
+
+    for (int i = 1; i < sorted.length; i++) {
+      final prev = sorted[i - 1];
+      final curr = sorted[i];
+
+      // 前チャンクの終了時刻と現チャンクの開始時刻の差が65秒以内 かつ 同一デバイス
+      // → 同じ録音セッションの連続チャンクと判定
+      final prevEnd = prev.timerStart + prev.seconds;
+      final gap = curr.timerStart - prevEnd;
+
+      if (gap <= 65 && curr.device == prev.device) {
+        currentGroup.add(curr);
+      } else {
+        groups.add(currentGroup);
+        currentGroup = [curr];
+      }
+    }
+    groups.add(currentGroup);
+
+    debugPrint('[AISA Offline] ${wals.length}チャンク → ${groups.length}セッションにグループ化');
+    return groups;
   }
 
   /// WAVバイト列のRMS振幅を計算し、声が含まれているか判定する
