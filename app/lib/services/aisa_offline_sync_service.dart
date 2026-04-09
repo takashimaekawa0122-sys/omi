@@ -133,6 +133,7 @@ class AisaOfflineSyncService {
 
   /// WAL 1件を文字起こしのみ（Firestoreには保存しない）
   /// 複数チャンクを結合して1件として保存するため、保存は呼び出し元に任せる
+  /// 失敗時は最大2回リトライする（タイムアウト・ネットワークエラー対策）
   Future<String?> _transcribeWalOnly(Wal wal) async {
     final fullPath = await Wal.getFilePath(wal.filePath);
     if (fullPath == null) return null;
@@ -142,7 +143,10 @@ class AisaOfflineSyncService {
 
     // .binファイルからOpusフレームを読み出す
     final frames = await _readFrames(file);
-    if (frames.isEmpty) return null;
+    if (frames.isEmpty) {
+      debugPrint('[AISA] チャンク ${wal.id}: フレームなし → スキップ');
+      return null;
+    }
 
     // OpusフレームをWAVに変換
     // wal.idでファイル名を一意にする（timerStartは同一になりうるため）
@@ -159,7 +163,9 @@ class AisaOfflineSyncService {
     // SDカード録音はユーザーが意図的に録音したものなので非常に寛容な閾値にする
     // 閾値50: ほぼ無音（ホワイトノイズのみ）のチャンクだけスキップ
     final wavBytes = await wavFile.readAsBytes();
-    if (!_hasVoiceActivity(wavBytes)) {
+    final rms = _calcRms(wavBytes);
+    if (rms <= 50) {
+      debugPrint('[AISA] チャンク ${wal.id}: VADスキップ (RMS=$rms ≤ 50)');
       await wavFile.delete();
       return null;
     }
@@ -167,14 +173,53 @@ class AisaOfflineSyncService {
     // ファイルサイズ確認（Groq Whisperは25MB制限）
     final wavSize = wavBytes.length;
     if (wavSize > 24 * 1024 * 1024) {
-      debugPrint('[AISA Offline] WAVが大きすぎてスキップ: '
-          '${(wavSize / 1024 / 1024).toStringAsFixed(1)}MB (${wal.id})');
+      debugPrint('[AISA] チャンク ${wal.id}: WAVが大きすぎてスキップ '
+          '(${(wavSize / 1024 / 1024).toStringAsFixed(1)}MB)');
       await wavFile.delete();
       return null;
     }
 
-    // Groq Whisper 文字起こしのみ（Firestoreには保存しない）
-    return await AisaTranscriptionService.instance.transcribeOnly(wavFile);
+    // Groq Whisper 文字起こし（最大2回リトライ）
+    // タイムアウト・ネットワークエラー・レートリミットに対応
+    const maxRetries = 2;
+    for (int attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        final transcript = await AisaTranscriptionService.instance.transcribeOnly(wavFile);
+        // 成功: WAVを削除して返す
+        try { await wavFile.delete(); } catch (_) {}
+        return transcript;
+      } catch (e) {
+        final isRateLimit = e.toString().contains('429');
+        final waitSecs = isRateLimit ? 60 : 10 * (attempt + 1); // レートリミットは60秒待機
+
+        if (attempt < maxRetries) {
+          debugPrint('[AISA] チャンク ${wal.id}: 文字起こし失敗 '
+              '(試行 ${attempt + 1}/$maxRetries, ${waitSecs}s後リトライ): $e');
+          await Future.delayed(Duration(seconds: waitSecs));
+        } else {
+          debugPrint('[AISA] チャンク ${wal.id}: 全試行失敗 → スキップ: $e');
+        }
+      }
+    }
+
+    // 全リトライ失敗: WAVを削除してnullを返す
+    try { await wavFile.delete(); } catch (_) {}
+    return null;
+  }
+
+  /// WAVバイト列のRMS値を計算（VADチェック用）
+  double _calcRms(List<int> wavBytes) {
+    if (wavBytes.length <= 44) return 0;
+    double sumSquares = 0;
+    int count = 0;
+    for (int i = 44; i < wavBytes.length - 1; i += 2) {
+      int sample = (wavBytes[i + 1] << 8) | wavBytes[i];
+      if (sample > 32767) sample -= 65536;
+      sumSquares += sample * sample;
+      count++;
+    }
+    if (count == 0) return 0;
+    return sqrt(sumSquares / count);
   }
 
   /// 同一録音セッションのWALをグループ化する
@@ -211,23 +256,6 @@ class AisaOfflineSyncService {
     return groups;
   }
 
-  /// WAVバイト列のRMS振幅を計算し、声が含まれているか判定する
-  /// 44バイトのWAVヘッダーをスキップし、16bit PCMサンプルのRMSを計算
-  bool _hasVoiceActivity(List<int> wavBytes) {
-    if (wavBytes.length <= 44) return false;
-    double sumSquares = 0;
-    int count = 0;
-    for (int i = 44; i < wavBytes.length - 1; i += 2) {
-      int sample = (wavBytes[i + 1] << 8) | wavBytes[i];
-      if (sample > 32767) sample -= 65536; // signed変換
-      sumSquares += sample * sample;
-      count++;
-    }
-    if (count == 0) return false;
-    final rms = sqrt(sumSquares / count);
-    debugPrint('[AISA VAD] RMS=$rms (閾値50: これ以下は完全無音として除外)');
-    return rms > 50; // 300→50に引き下げ: SDカード録音は寛容に（ほぼ完全無音のみスキップ）
-  }
 
   /// WAL .binファイルのフォーマット: [uint32_LE(フレームサイズ)][フレームバイト列] の繰り返し
   Future<List<List<int>>> _readFrames(File file) async {
