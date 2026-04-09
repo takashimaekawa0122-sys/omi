@@ -16,6 +16,7 @@ import 'package:omi/services/aisa_transcription_service.dart';
 import 'package:omi/services/wals/local_wal_sync.dart';
 import 'package:omi/services/wals/wal.dart';
 import 'package:omi/utils/audio/wav_bytes.dart';
+import 'package:omi/utils/aisa_debug_logger.dart';
 
 class AisaOfflineSyncService {
   AisaOfflineSyncService._();
@@ -46,6 +47,7 @@ class AisaOfflineSyncService {
     const groqApiKey = String.fromEnvironment('GROQ_API_KEY');
     if (groqApiKey.isEmpty) {
       debugPrint('[AISA Offline] GROQ_API_KEY未設定のためオフライン同期をスキップ');
+      AisaDebugLogger.instance.error('❌ [Offline] GROQ_API_KEY未設定 - オフライン同期不可');
       return;
     }
 
@@ -56,6 +58,7 @@ class AisaOfflineSyncService {
     if (diskWals.isEmpty) return;
 
     debugPrint('[AISA Offline] ${diskWals.length}件のオフライン録音を処理開始');
+    AisaDebugLogger.instance.info('[Offline] ${diskWals.length}件のオフライン録音を処理開始');
 
     // Omiクラウドへの音声流出を防ぐため、Groq処理の前に全WALをsynced済みとしてマークする
     // 【パフォーマンス最適化】全WALのstatusを直接更新してから最後に1回だけ保存・通知する
@@ -109,6 +112,7 @@ class AisaOfflineSyncService {
           }
         } catch (e) {
           debugPrint('[AISA Offline] WAL文字起こし失敗 ${wal.id}: $e');
+          AisaDebugLogger.instance.error('❌ [Offline] WAL失敗 ${wal.id}: $e');
           failCount++;
           // 失敗時はpreviousTranscriptをそのまま維持（直前の成功チャンクの文脈を保持）
         }
@@ -149,6 +153,8 @@ class AisaOfflineSyncService {
 
     debugPrint('[AISA Offline] ${diskWals.length}チャンク処理完了 → $savedSessions件の会話として保存 '
         '(成功: $successCount, スキップ: $skipCount, 失敗: $failCount)');
+    AisaDebugLogger.instance.info(
+        '[Offline] 完了: $savedSessions件保存 (成功=$successCount スキップ=$skipCount 失敗=$failCount)');
   }
 
   /// WAL 1件を文字起こしのみ（Firestoreには保存しない）

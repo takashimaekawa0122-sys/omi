@@ -18,6 +18,7 @@ import 'package:omi/backend/http/api/conversations.dart';
 import 'package:omi/services/aisa_firestore_service.dart';
 import 'package:omi/services/aisa_offline_sync_service.dart';
 import 'package:omi/services/aisa_transcription_service.dart';
+import 'package:omi/utils/aisa_debug_logger.dart';
 import 'package:omi/utils/audio/wav_bytes.dart';
 import 'package:omi/backend/http/api/users.dart';
 import 'package:omi/backend/preferences.dart';
@@ -418,6 +419,7 @@ class CaptureProvider extends ChangeNotifier
     _aisaTimer ??= Timer.periodic(const Duration(seconds: 5), (_) {
       _triggerAisaTranscription();
     });
+    AisaDebugLogger.instance.info('タイマー起動: 5秒間隔, session=$_sessionStartSeconds');
     notifyListeners();
     return;
 
@@ -1324,6 +1326,8 @@ class CaptureProvider extends ChangeNotifier
     _aisaFrameBuffer.clear();
     Logger.debug('[AISA] 文字起こし開始: ${frames.length}フレーム (codec: $_aisaCodec)');
 
+    AisaDebugLogger.instance.info('▶ 文字起こし開始: ${frames.length}フレーム (codec: $_aisaCodec)');
+
     // WAVファイルを追跡して例外発生時も確実に削除する（processAndSave呼び出し前の例外でリーク防止）
     File? wavFile;
     try {
@@ -1344,11 +1348,14 @@ class CaptureProvider extends ChangeNotifier
       wavFile = null;
       final transcript = await AisaTranscriptionService.instance.processAndSave(fileToProcess);
       if (transcript != null && transcript.trim().isNotEmpty) {
+        AisaDebugLogger.instance.info('✅ 文字起こし成功: "${transcript.substring(0, transcript.length.clamp(0, 60))}${transcript.length > 60 ? "…" : ""}"');
         _addAisaConversation(transcript);
       } else {
+        AisaDebugLogger.instance.warning('⚠ 文字起こし結果なし（無音 or Groqエラー）');
         Logger.debug('[AISA] 文字起こし結果なし（無音 or Groqエラー）');
       }
     } catch (e) {
+      AisaDebugLogger.instance.error('❌ 音声処理失敗: $e');
       Logger.debug('[AISA] 音声処理失敗: $e');
     } finally {
       // processAndSave呼び出し前に例外が発生した場合にWAVファイルを削除
@@ -1372,7 +1379,7 @@ class CaptureProvider extends ChangeNotifier
     }
     if (count == 0) return false;
     final rms = sqrt(sumSquares / count);
-    Logger.debug('[AISA VAD] RMS=$rms');
+    AisaDebugLogger.instance.info('VAD: RMS=${rms.toStringAsFixed(1)} (閾値=100) → ${rms > 100 ? "通過" : "スキップ"}');
     return rms > 100; // 100未満は無音/ノイズ（ペンダントマイクは近距離のため100で十分）
   }
 

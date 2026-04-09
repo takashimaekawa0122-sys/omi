@@ -7,6 +7,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/foundation.dart';
+import 'package:omi/utils/aisa_debug_logger.dart';
 
 const _aisaFirebaseOptions = FirebaseOptions(
   apiKey: 'AIzaSyCDMXPc798PXd2Q7V0zC3NfcG-95BXR3vY',
@@ -79,7 +80,10 @@ class AisaFirestoreService {
   }
 
   Future<void> saveTranscript(String transcript) async {
-    if (!_initialized || _firestore == null) return;
+    if (!_initialized || _firestore == null) {
+      AisaDebugLogger.instance.warning('⚠ Firestore未初期化 - 保存スキップ');
+      return;
+    }
     if (transcript.trim().isEmpty) return;
 
     final now = DateTime.now();
@@ -99,6 +103,7 @@ class AisaFirestoreService {
       'source': 'groq',
     });
 
+    AisaDebugLogger.instance.info('Firestore保存: $dateStr (${transcript.length}文字)');
     debugPrint('[AISA] Groq文字起こし保存成功: $dateStr');
   }
 }

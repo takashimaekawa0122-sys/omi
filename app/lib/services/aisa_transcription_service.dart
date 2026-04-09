@@ -11,6 +11,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import 'package:omi/services/aisa_firestore_service.dart';
+import 'package:omi/utils/aisa_debug_logger.dart';
 
 class AisaTranscriptionService {
   AisaTranscriptionService._();
@@ -23,17 +24,25 @@ class AisaTranscriptionService {
   static const _anthropicApiKey = String.fromEnvironment('ANTHROPIC_API_KEY');
 
   /// 音声ファイルを文字起こししてFirestoreに保存し、テキストを返す
+  /// Firestore保存に失敗してもトランスクリプトはUIに返す（保存失敗で表示も消えるバグを修正）
   Future<String?> processAndSave(File wavFile) async {
     try {
       final transcript = await _transcribe(wavFile);
       if (transcript != null && transcript.trim().isNotEmpty) {
-        await AisaFirestoreService.instance.saveTranscript(transcript);
+        // Firestoreへの保存失敗はログのみ — UIへの表示はFirestore成功・失敗に関係なく行う
+        try {
+          await AisaFirestoreService.instance.saveTranscript(transcript);
+        } catch (saveError) {
+          debugPrint('[AISA] Firestore保存失敗（UIには表示）: $saveError');
+          AisaDebugLogger.instance.warning('⚠ Firestore保存失敗（UIには表示）: $saveError');
+        }
         debugPrint('[AISA] 文字起こし成功: $transcript');
         return transcript;
       }
       return null;
     } catch (e) {
       debugPrint('[AISA] 文字起こし処理失敗: $e');
+      AisaDebugLogger.instance.error('❌ 文字起こし処理失敗: $e');
       return null;
     } finally {
       try {
@@ -55,11 +64,14 @@ class AisaTranscriptionService {
   Future<String?> _transcribe(File wavFile, {String? previousContext}) async {
     // APIキー未設定チェック（ビルド時に--dart-define=GROQ_API_KEY=...が必要）
     if (_groqApiKey.isEmpty) {
+      AisaDebugLogger.instance.error('❌ GROQ_API_KEY未設定！build.sh でリビルドしてください');
       debugPrint('[AISA] ⚠️ GROQ_API_KEY未設定！build.sh を使ってリビルドしてください。文字起こし不可。');
       return null;
     }
 
     final fileSize = await wavFile.length();
+    AisaDebugLogger.instance.info('Groq API送信: ${(fileSize / 1024).toStringAsFixed(0)}KB'
+        '${previousContext != null ? ", 文脈あり(${previousContext.length}chars)" : ""}');
     debugPrint('[AISA] Groq送信: ${wavFile.path} (${(fileSize / 1024).toStringAsFixed(0)}KB)');
 
     final request = http.MultipartRequest('POST', Uri.parse(_endpoint));
@@ -91,14 +103,16 @@ class AisaTranscriptionService {
     final body = await streamedResponse.stream.bytesToString();
 
     if (streamedResponse.statusCode == 429) {
-      // レートリミット: 呼び出し元で待機・リトライできるよう専用例外をthrow
+      AisaDebugLogger.instance.error('❌ Groq レートリミット(429) - 60秒後にリトライ');
       throw Exception('Groq rate limit (429): $body');
     }
 
     if (streamedResponse.statusCode != 200) {
+      AisaDebugLogger.instance.error('❌ Groq APIエラー ${streamedResponse.statusCode}: ${body.substring(0, body.length.clamp(0, 100))}');
       debugPrint('[AISA] Groq API エラー ${streamedResponse.statusCode}: $body');
       throw Exception('Groq API error ${streamedResponse.statusCode}: $body');
     }
+    AisaDebugLogger.instance.info('Groq APIレスポンス: HTTP ${streamedResponse.statusCode} OK');
 
     final json = jsonDecode(body) as Map<String, dynamic>;
     final filtered = _filterSpeechSegments(json);
@@ -107,8 +121,10 @@ class AisaTranscriptionService {
     // Claude Haiku後処理: 文脈から明らかに誤った漢字・同音異義語を修正
     // APIキー未設定の場合はスキップ（Whisper結果をそのまま返す）
     if (_anthropicApiKey.isNotEmpty) {
+      AisaDebugLogger.instance.info('Claude校正: 開始 (${filtered.length}文字)');
       return await _correctWithClaude(filtered);
     }
+    AisaDebugLogger.instance.info('Claude校正: スキップ (ANTHROPIC_API_KEY未設定)');
     return filtered;
   }
 
@@ -170,6 +186,11 @@ class AisaTranscriptionService {
     }
 
     final result = buffer.toString().trim();
+    AisaDebugLogger.instance.info(
+      'セグメントフィルタ: $total件中 $kept件採用'
+      ' (ノイズ除外=$skippedNoSpeech 低信頼度=$skippedLowConf)'
+      ' → ${result.length}文字${result.isEmpty ? " [空のため破棄]" : ""}',
+    );
     debugPrint('[AISA] Groq成功: $total セグメント中 $kept件を採用 '
         '(ノイズ除外: $skippedNoSpeech件, 低確信度除外: $skippedLowConf件) '
         '→ ${result.length}文字');
@@ -232,10 +253,14 @@ class AisaTranscriptionService {
 
       final result = corrected.trim();
       if (result != whisperText) {
+        AisaDebugLogger.instance.info('Claude校正: 変更あり (${whisperText.length}→${result.length}文字)');
         debugPrint('[AISA Claude] 校正完了: ${whisperText.length}文字 → ${result.length}文字');
+      } else {
+        AisaDebugLogger.instance.info('Claude校正: 変更なし (${result.length}文字)');
       }
       return result;
     } catch (e) {
+      AisaDebugLogger.instance.warning('⚠ Claude校正エラー (Whisper結果を使用): $e');
       debugPrint('[AISA Claude] 校正エラー（Whisper結果を使用）: $e');
       return whisperText; // エラー時はWhisper結果をそのまま返す
     }
