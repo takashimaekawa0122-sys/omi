@@ -58,7 +58,10 @@ class AisaTranscriptionService {
     request.headers['Accept'] = 'application/json';
     request.fields['model'] = 'whisper-large-v3';
     request.fields['language'] = 'ja';
-    request.fields['response_format'] = 'json';
+    // verbose_json: セグメントごとにno_speech_prob/avg_logprobを取得してBGM・雑音を除外できる
+    request.fields['response_format'] = 'verbose_json';
+    // ペンダント（近距離マイク）の話者の声に集中するよう誘導
+    request.fields['prompt'] = 'これはペンダント型マイクで録音した音声です。マイクに近い話者の声のみ文字起こしします。';
     request.files.add(await http.MultipartFile.fromPath('file', wavFile.path));
 
     // 90秒タイムアウト: タイムアウト時はTimeoutExceptionをthrow（呼び出し元でリトライ）
@@ -79,8 +82,61 @@ class AisaTranscriptionService {
     }
 
     final json = jsonDecode(body) as Map<String, dynamic>;
-    final text = json['text'] as String?;
-    debugPrint('[AISA] Groq成功: ${text?.length ?? 0}文字');
-    return text;
+    return _filterSpeechSegments(json);
+  }
+
+  /// verbose_jsonのセグメントから人の声らしい区間だけを抽出する
+  ///
+  /// Whisperは各セグメントに以下のスコアを付与する:
+  ///   no_speech_prob : 0〜1 (高いほど「声ではない」確率が高い)
+  ///   avg_logprob    : 0以下 (0に近いほど高確信度, -1以下は不明瞭)
+  ///
+  /// 除外基準:
+  ///   no_speech_prob >= 0.6  → BGM・環境音・ノイズと判定
+  ///   avg_logprob < -1.0     → Whisperが内容を認識できない（ノイズや遠方音）
+  String? _filterSpeechSegments(Map<String, dynamic> json) {
+    final segments = json['segments'] as List<dynamic>?;
+
+    // verbose_jsonのセグメント情報が取れない場合はtextフィールドをそのまま返す
+    if (segments == null || segments.isEmpty) {
+      final text = json['text'] as String?;
+      debugPrint('[AISA] Groq成功（セグメントなし）: ${text?.length ?? 0}文字');
+      return text?.trim().isEmpty == true ? null : text;
+    }
+
+    int total = segments.length;
+    int kept = 0;
+    int skippedNoSpeech = 0;
+    int skippedLowConf = 0;
+
+    final buffer = StringBuffer();
+    for (final seg in segments) {
+      final noSpeechProb = (seg['no_speech_prob'] as num?)?.toDouble() ?? 0.0;
+      final avgLogprob = (seg['avg_logprob'] as num?)?.toDouble() ?? 0.0;
+      final text = (seg['text'] as String?)?.trim() ?? '';
+
+      if (noSpeechProb >= 0.6) {
+        // BGM・環境音・ノイズと判定 → 除外
+        debugPrint('[AISA VAD] 除外(no_speech=$noSpeechProb): "$text"');
+        skippedNoSpeech++;
+        continue;
+      }
+      if (avgLogprob < -1.0) {
+        // Whisperが内容を認識できない（遠方・不明瞭） → 除外
+        debugPrint('[AISA VAD] 除外(logprob=$avgLogprob): "$text"');
+        skippedLowConf++;
+        continue;
+      }
+
+      buffer.write(text);
+      kept++;
+    }
+
+    final result = buffer.toString().trim();
+    debugPrint('[AISA] Groq成功: $total セグメント中 $kept件を採用 '
+        '(no_speech除外: $skippedNoSpeech件, 低確信度除外: $skippedLowConf件) '
+        '→ ${result.length}文字');
+
+    return result.isEmpty ? null : result;
   }
 }
