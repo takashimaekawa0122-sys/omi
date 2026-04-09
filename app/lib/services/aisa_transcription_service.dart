@@ -19,6 +19,9 @@ class AisaTranscriptionService {
   static const _endpoint = 'https://api.groq.com/openai/v1/audio/transcriptions';
   static const _groqApiKey = String.fromEnvironment('GROQ_API_KEY');
 
+  static const _claudeEndpoint = 'https://api.anthropic.com/v1/messages';
+  static const _anthropicApiKey = String.fromEnvironment('ANTHROPIC_API_KEY');
+
   /// 音声ファイルを文字起こししてFirestoreに保存し、テキストを返す
   Future<String?> processAndSave(File wavFile) async {
     try {
@@ -42,13 +45,14 @@ class AisaTranscriptionService {
   }
 
   /// 文字起こしのみ行い、Firestoreには保存しない
+  /// [previousContext]: 直前チャンクの末尾テキスト（Whisperプロンプトに付加して文脈を提供）
   /// 失敗時は例外をthrow（呼び出し元でリトライ処理するため）
   /// WAVファイルの削除は呼び出し元の責任
-  Future<String?> transcribeOnly(File wavFile) async {
-    return await _transcribe(wavFile); // 例外はそのまま上に伝播
+  Future<String?> transcribeOnly(File wavFile, {String? previousContext}) async {
+    return await _transcribe(wavFile, previousContext: previousContext); // 例外はそのまま上に伝播
   }
 
-  Future<String?> _transcribe(File wavFile) async {
+  Future<String?> _transcribe(File wavFile, {String? previousContext}) async {
     final fileSize = await wavFile.length();
     debugPrint('[AISA] Groq送信: ${wavFile.path} (${(fileSize / 1024).toStringAsFixed(0)}KB)');
 
@@ -61,7 +65,16 @@ class AisaTranscriptionService {
     // verbose_json: セグメントごとにno_speech_prob/avg_logprobを取得してBGM・雑音を除外できる
     request.fields['response_format'] = 'verbose_json';
     // ペンダント（近距離マイク）の話者の声に集中するよう誘導
-    request.fields['prompt'] = 'これはペンダント型マイクで録音した音声です。マイクに近い話者の声のみ文字起こしします。';
+    // previousContextがある場合は直前チャンクの末尾テキストを付加して文脈を提供する
+    // （文の途中切れ防止 + 同音異義語の文脈補助）
+    final basePrompt = 'これはペンダント型マイクで録音した音声です。句読点を含めて正確に文字起こしします。背景音やノイズは無視してください。';
+    if (previousContext != null && previousContext.isNotEmpty) {
+      // Whisperのpromptは最大224トークン。末尾200文字を渡して文脈を与える
+      final tail = previousContext.length > 200 ? previousContext.substring(previousContext.length - 200) : previousContext;
+      request.fields['prompt'] = '$basePrompt 前の発話：$tail';
+    } else {
+      request.fields['prompt'] = basePrompt;
+    }
     request.files.add(await http.MultipartFile.fromPath('file', wavFile.path));
 
     // 90秒タイムアウト: タイムアウト時はTimeoutExceptionをthrow（呼び出し元でリトライ）
@@ -82,7 +95,15 @@ class AisaTranscriptionService {
     }
 
     final json = jsonDecode(body) as Map<String, dynamic>;
-    return _filterSpeechSegments(json);
+    final filtered = _filterSpeechSegments(json);
+    if (filtered == null || filtered.isEmpty) return filtered;
+
+    // Claude Haiku後処理: 文脈から明らかに誤った漢字・同音異義語を修正
+    // APIキー未設定の場合はスキップ（Whisper結果をそのまま返す）
+    if (_anthropicApiKey.isNotEmpty) {
+      return await _correctWithClaude(filtered);
+    }
+    return filtered;
   }
 
   /// verbose_jsonのセグメントから人の声らしい区間だけを抽出する
@@ -92,7 +113,8 @@ class AisaTranscriptionService {
   ///   avg_logprob    : 0以下 (0に近いほど高確信度, -1以下は不明瞭)
   ///
   /// 除外基準:
-  ///   no_speech_prob >= 0.6  → BGM・環境音・ノイズと判定
+  ///   no_speech_prob >= 0.5  → BGM・環境音・ノイズと判定
+  ///   compression_ratio > 2.4 → TV・BGM（Whisperが意味のないテキストを繰り返す）
   ///   avg_logprob < -1.0     → Whisperが内容を認識できない（ノイズや遠方音）
   String? _filterSpeechSegments(Map<String, dynamic> json) {
     final segments = json['segments'] as List<dynamic>?;
@@ -115,9 +137,17 @@ class AisaTranscriptionService {
       final avgLogprob = (seg['avg_logprob'] as num?)?.toDouble() ?? 0.0;
       final text = (seg['text'] as String?)?.trim() ?? '';
 
-      if (noSpeechProb >= 0.6) {
-        // BGM・環境音・ノイズと判定 → 除外
+      final compressionRatio = (seg['compression_ratio'] as num?)?.toDouble() ?? 1.0;
+
+      if (noSpeechProb >= 0.5) {
+        // BGM・環境音・ノイズと判定 → 除外（0.6→0.5に引き下げてより積極的に除去）
         debugPrint('[AISA VAD] 除外(no_speech=$noSpeechProb): "$text"');
+        skippedNoSpeech++;
+        continue;
+      }
+      if (compressionRatio > 2.4) {
+        // BGM・TV音声の特徴: Whisperが意味のないテキストを繰り返し生成し圧縮率が高くなる
+        debugPrint('[AISA VAD] 除外(compression=$compressionRatio): "$text"');
         skippedNoSpeech++;
         continue;
       }
@@ -134,9 +164,73 @@ class AisaTranscriptionService {
 
     final result = buffer.toString().trim();
     debugPrint('[AISA] Groq成功: $total セグメント中 $kept件を採用 '
-        '(no_speech除外: $skippedNoSpeech件, 低確信度除外: $skippedLowConf件) '
+        '(ノイズ除外: $skippedNoSpeech件, 低確信度除外: $skippedLowConf件) '
         '→ ${result.length}文字');
 
     return result.isEmpty ? null : result;
+  }
+
+  /// Claude Haiku APIで音声認識結果を校正する
+  ///
+  /// Whisperは音だけで漢字を選ぶため同音異義語を間違えることがある。
+  /// Claude Haikuは文脈から「機械」と「機会」のどちらが正しいか判断できる。
+  ///
+  /// ハルシネーション防止のため:
+  /// - 「修正後のテキストのみ返す」と明示し余計な説明を排除
+  /// - 「正しい可能性があるものは修正しない」と保守的な姿勢を指示
+  Future<String?> _correctWithClaude(String whisperText) async {
+    try {
+      const prompt = '''あなたは日本語音声認識の校正ツールです。
+以下の音声認識結果を校正してください。
+
+【ルール】
+・文脈から明らかに誤っている漢字・同音異義語のみ修正
+・内容の追加・削除・言い換えは一切禁止
+・正しい可能性があるものは修正しない（迷ったら元のままにする）
+・修正後のテキストのみ返す（説明・コメント不要）
+
+【音声認識テキスト】
+''';
+
+      final response = await http.post(
+        Uri.parse(_claudeEndpoint),
+        headers: {
+          'x-api-key': _anthropicApiKey,
+          'anthropic-version': '2023-06-01',
+          'content-type': 'application/json',
+        },
+        body: jsonEncode({
+          'model': 'claude-haiku-4-5-20251001',
+          'max_tokens': 1024,
+          'temperature': 0.1, // 低温度で決定論的な校正
+          'messages': [
+            {'role': 'user', 'content': '$prompt$whisperText'},
+          ],
+        }),
+      ).timeout(const Duration(seconds: 30));
+
+      if (response.statusCode != 200) {
+        debugPrint('[AISA Claude] 校正失敗 ${response.statusCode}: ${response.body}');
+        return whisperText; // 失敗時はWhisper結果をそのまま返す
+      }
+
+      final json = jsonDecode(response.body) as Map<String, dynamic>;
+      final corrected = (json['content'] as List<dynamic>?)
+          ?.whereType<Map<String, dynamic>>()
+          .firstWhere((c) => c['type'] == 'text', orElse: () => {})['text'] as String?;
+
+      if (corrected == null || corrected.trim().isEmpty) {
+        return whisperText;
+      }
+
+      final result = corrected.trim();
+      if (result != whisperText) {
+        debugPrint('[AISA Claude] 校正完了: ${whisperText.length}文字 → ${result.length}文字');
+      }
+      return result;
+    } catch (e) {
+      debugPrint('[AISA Claude] 校正エラー（Whisper結果を使用）: $e');
+      return whisperText; // エラー時はWhisper結果をそのまま返す
+    }
   }
 }

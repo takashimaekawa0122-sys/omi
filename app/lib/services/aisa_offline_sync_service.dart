@@ -77,6 +77,7 @@ class AisaOfflineSyncService {
     int skipCount = 0;
     int failCount = 0;
     final Map<String, String> walTranscripts = {}; // walId → transcript
+    String? previousTranscript; // 直前チャンクのテキスト（Whisperプロンプトへの文脈提供用）
 
     for (int i = 0; i < diskWals.length; i++) {
       // キャンセルチェック（手動同期開始時などに中断）
@@ -87,12 +88,16 @@ class AisaOfflineSyncService {
 
       final wal = diskWals[i];
       try {
-        final transcript = await _transcribeWalOnly(wal);
+        final transcript = await _transcribeWalOnly(wal, previousContext: previousTranscript);
         if (transcript == null) {
           skipCount++; // 無音またはデコード失敗
+          // 無音チャンクの場合は文脈をリセット（別の話題の可能性）
+          previousTranscript = null;
         } else if (transcript.trim().isNotEmpty) {
           walTranscripts[wal.id] = transcript.trim();
           successCount++;
+          // 次のチャンクのWhisperプロンプトに渡す文脈を更新
+          previousTranscript = transcript.trim();
         }
       } catch (e) {
         debugPrint('[AISA Offline] WAL文字起こし失敗 ${wal.id}: $e');
@@ -132,9 +137,10 @@ class AisaOfflineSyncService {
   }
 
   /// WAL 1件を文字起こしのみ（Firestoreには保存しない）
+  /// [previousContext]: 直前チャンクの末尾テキスト（Whisperプロンプトへの文脈提供用）
   /// 複数チャンクを結合して1件として保存するため、保存は呼び出し元に任せる
   /// 失敗時は最大2回リトライする（タイムアウト・ネットワークエラー対策）
-  Future<String?> _transcribeWalOnly(Wal wal) async {
+  Future<String?> _transcribeWalOnly(Wal wal, {String? previousContext}) async {
     final fullPath = await Wal.getFilePath(wal.filePath);
     if (fullPath == null) return null;
 
@@ -184,7 +190,7 @@ class AisaOfflineSyncService {
     const maxRetries = 2;
     for (int attempt = 0; attempt <= maxRetries; attempt++) {
       try {
-        final transcript = await AisaTranscriptionService.instance.transcribeOnly(wavFile);
+        final transcript = await AisaTranscriptionService.instance.transcribeOnly(wavFile, previousContext: previousContext);
         // 成功: WAVを削除して返す
         try { await wavFile.delete(); } catch (_) {}
         return transcript;
