@@ -581,7 +581,12 @@ class LocalWalSyncImpl implements LocalWalSync {
   }) async {
     await _flush();
 
-    var walToSync = _wals.where((w) => w == wal).toList().first;
+    final matched = _wals.where((w) => w == wal).toList();
+    if (matched.isEmpty) {
+      debugPrint('[LocalWal] syncWal: WALが_walsリストに見つかりません (id=${wal.id})');
+      return null;
+    }
+    var walToSync = matched.first;
 
     var resp = SyncLocalFilesResponse(newConversationIds: [], updatedConversationIds: []);
 
