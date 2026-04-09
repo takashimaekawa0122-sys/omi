@@ -118,6 +118,13 @@ class AisaTranscriptionService {
     final filtered = _filterSpeechSegments(json);
     if (filtered == null || filtered.isEmpty) return filtered;
 
+    // Whisperハルシネーション除去: 無音・ノイズから生成される定型文をブロック
+    if (_isHallucination(filtered)) {
+      AisaDebugLogger.instance.warning('⚠ ハルシネーション除外: "$filtered"');
+      debugPrint('[AISA] ハルシネーション除外: "$filtered"');
+      return null;
+    }
+
     // Claude Haiku後処理: 文脈から明らかに誤った漢字・同音異義語を修正
     // APIキー未設定の場合はスキップ（Whisper結果をそのまま返す）
     if (_anthropicApiKey.isNotEmpty) {
@@ -196,6 +203,37 @@ class AisaTranscriptionService {
         '→ ${result.length}文字');
 
     return result.isEmpty ? null : result;
+  }
+
+  /// Whisperが無音・ノイズから生成する定型ハルシネーションを検出する
+  /// 実際に発話していないのにWhisperが勝手に生成するフレーズのブロックリスト
+  static bool _isHallucination(String text) {
+    final t = text.trim();
+    // 短すぎるテキスト（3文字以下）は意味のある発話ではない可能性が高い
+    if (t.length <= 3) return true;
+
+    const hallucinations = [
+      'ご視聴ありがとうございました',
+      'ご視聴ありがとうございます',
+      'チャンネル登録お願いします',
+      'チャンネル登録よろしくお願いします',
+      'お疲れ様でした',
+      'おやすみなさい',
+      'ありがとうございました',
+      '字幕視聴ありがとうございました',
+      'ご清聴ありがとうございました',
+      '最後までご視聴ありがとうございました',
+      'いい加減にしろ',
+      'Thanks for watching',
+      'Thank you for watching',
+      'Subscribe',
+      'Bye bye',
+      'Goodbye',
+    ];
+    for (final h in hallucinations) {
+      if (t == h || t == '$h。' || t == '$h！') return true;
+    }
+    return false;
   }
 
   /// Claude Haiku APIで音声認識結果を校正する
