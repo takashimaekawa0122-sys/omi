@@ -113,8 +113,8 @@ class AisaTranscriptionService {
   ///   avg_logprob    : 0以下 (0に近いほど高確信度, -1以下は不明瞭)
   ///
   /// 除外基準:
-  ///   no_speech_prob >= 0.5  → BGM・環境音・ノイズと判定
-  ///   compression_ratio > 2.4 → TV・BGM（Whisperが意味のないテキストを繰り返す）
+  ///   no_speech_prob >= 0.6  → BGM・環境音・ノイズと判定（元の閾値に戻す: 0.5は厳しすぎた）
+  ///   compression_ratio > 2.8 → Whisperハルシネーション（同じテキストを繰り返す異常状態）
   ///   avg_logprob < -1.0     → Whisperが内容を認識できない（ノイズや遠方音）
   String? _filterSpeechSegments(Map<String, dynamic> json) {
     final segments = json['segments'] as List<dynamic>?;
@@ -139,14 +139,15 @@ class AisaTranscriptionService {
 
       final compressionRatio = (seg['compression_ratio'] as num?)?.toDouble() ?? 1.0;
 
-      if (noSpeechProb >= 0.5) {
-        // BGM・環境音・ノイズと判定 → 除外（0.6→0.5に引き下げてより積極的に除去）
+      if (noSpeechProb >= 0.6) {
+        // BGM・環境音・ノイズと判定 → 除外
         debugPrint('[AISA VAD] 除外(no_speech=$noSpeechProb): "$text"');
         skippedNoSpeech++;
         continue;
       }
-      if (compressionRatio > 2.4) {
-        // BGM・TV音声の特徴: Whisperが意味のないテキストを繰り返し生成し圧縮率が高くなる
+      if (compressionRatio > 2.8) {
+        // Whisperハルシネーション: 同じテキストを繰り返し生成する異常状態
+        // 閾値2.8: 通常の会話（〜1.8）や多少の繰り返し（〜2.4）は通過させる
         debugPrint('[AISA VAD] 除外(compression=$compressionRatio): "$text"');
         skippedNoSpeech++;
         continue;
