@@ -263,16 +263,18 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
       await _captureProvider!.stopStreamDeviceRecording();
     }
 
-    // ネイティブBLE通知を明示的に全解除（帯域をファイル転送専用に確保）
     final deviceId = SharedPreferencesUtil().btDevice.id;
-    if (deviceId.isNotEmpty) {
+
+    // BLE通知を一時停止してファイル転送専用に帯域を確保するヘルパー
+    Future<void> pauseBleNotifications() async {
+      if (deviceId.isEmpty) return;
       try {
         final connection = await ServiceManager.instance().device.ensureConnection(deviceId);
         if (connection != null) {
           final transport = connection.transport;
           if (transport is dynamic && transport.runtimeType.toString().contains('NativeBle')) {
             await (transport as dynamic).pauseAllNotifications();
-            Logger.debug('[AISA] BLE通知全解除完了 → SDカード転送開始');
+            Logger.debug('[AISA] BLE通知全解除完了');
           }
         }
       } catch (e) {
@@ -282,11 +284,38 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
       await Future.delayed(const Duration(milliseconds: 500));
     }
 
+    // ネイティブBLE通知を明示的に全解除（帯域をファイル転送専用に確保）
+    await pauseBleNotifications();
+
     try {
-      await _performSync(
-        operation: () => _walService.getSyncs().syncAll(progress: this, connectionListener: connectionListener),
-        context: 'sync all WALs',
-      );
+      // AISA: 転送失敗時は最大3回まで自動リトライ（storageOffsetが保持されるため途中再開可能）
+      const maxRetries = 3;
+      for (int attempt = 1; attempt <= maxRetries; attempt++) {
+        final isLastAttempt = attempt == maxRetries;
+
+        if (attempt > 1) {
+          Logger.debug('[AISA] SDカード転送リトライ $attempt/$maxRetries (5秒後)');
+          await Future.delayed(const Duration(seconds: 5));
+          // WALリストを最新化してから再試行
+          await refreshWals();
+          _totalWalsToProcess = missingWals.length;
+          _walsProcessedCount = 0;
+          // BLE通知を再度一時停止（前回の失敗でリストアされている可能性があるため）
+          await pauseBleNotifications();
+          // 再試行前にSyncing状態にリセット
+          _updateSyncState(_syncState.toSyncing());
+        }
+
+        final succeeded = await _performSync(
+          operation: () => _walService.getSyncs().syncAll(progress: this, connectionListener: connectionListener),
+          context: 'sync all WALs (attempt $attempt/$maxRetries)',
+          isLastAttempt: isLastAttempt,
+        );
+
+        if (succeeded || isLastAttempt) break;
+
+        Logger.debug('[AISA] 転送失敗 → リトライします (attempt $attempt/$maxRetries)');
+      }
     } finally {
       if (wasStreaming) {
         Logger.debug('[AISA] SDカード同期後に音声ストリーミングを再開');
@@ -317,13 +346,19 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
       operation: () => _walService.getSyncs().syncWal(wal: wal, progress: this, connectionListener: connectionListener),
       context: 'sync WAL ${wal.id}',
       failedWal: wal,
+      isLastAttempt: true, // Single WAL sync: always show error on failure
     );
   }
 
-  Future<void> _performSync({
+  /// Performs a single sync attempt.
+  /// Returns true on success, false on failure.
+  /// Only updates error state on failure if [isLastAttempt] is true,
+  /// so retry loops can call this without showing transient error states to the user.
+  Future<bool> _performSync({
     required Future<SyncLocalFilesResponse?> Function() operation,
     required String context,
     Wal? failedWal,
+    bool isLastAttempt = true,
   }) async {
     try {
       _updateSyncState(_syncState.toSyncing());
@@ -345,7 +380,7 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
       // If sync was cancelled while awaiting, don't override the cancel state.
       // cancelSync() already processed any partial conversation results.
       if (!_syncState.isSyncing && _syncState.status != SyncStatus.fetchingConversations) {
-        return;
+        return true; // Treat cancel as "done" so caller doesn't retry
       }
 
       if (result != null && _hasConversationResults(result)) {
@@ -361,6 +396,7 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
         DebugLogManager.logInfo('SyncProvider: $context completed with no new conversations');
         _updateSyncState(_syncState.toCompleted(conversations: []));
       }
+      return true;
     } catch (e) {
       final errorMessage = _formatSyncError(e, failedWal);
       Logger.debug('SyncProvider: Error in $context: $errorMessage');
@@ -368,7 +404,11 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
         if (failedWal != null) 'walId': failedWal.id,
         if (failedWal != null) 'walStorage': failedWal.storage.toString(),
       });
-      _updateSyncState(_syncState.toError(message: errorMessage, failedWal: failedWal));
+      // Only show error state on the final attempt to avoid flickering during retries
+      if (isLastAttempt) {
+        _updateSyncState(_syncState.toError(message: errorMessage, failedWal: failedWal));
+      }
+      return false;
     }
   }
 
