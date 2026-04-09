@@ -184,6 +184,9 @@ class CaptureProvider extends ChangeNotifier
         _pendingOfflineTranscripts.add(transcript);
         Logger.debug('[AISA Offline] conversationProvider未初期化のためバッファに積む: $transcript');
       }
+    }, onError: (e) {
+      // ストリームエラーをログに残す（アプリクラッシュを防ぐ）
+      Logger.debug('[AISA Offline] transcriptStreamエラー: $e');
     });
   }
 
@@ -1295,10 +1298,10 @@ class CaptureProvider extends ChangeNotifier
     );
     processInProgressConversation().then((result) {
       if (result == null || result.conversation == null) {
-        conversationProvider!.removeProcessingConversation('0');
+        conversationProvider?.removeProcessingConversation('0');
         return;
       }
-      conversationProvider!.removeProcessingConversation('0');
+      conversationProvider?.removeProcessingConversation('0');
       result.conversation!.isNew = true;
       _processConversationCreated(result.conversation, result.messages);
 
@@ -1306,6 +1309,10 @@ class CaptureProvider extends ChangeNotifier
       if (sessionStart > 0 && result.conversation != null) {
         _autoSyncSessionWals(sessionStart, result.conversation!.id);
       }
+    }).catchError((e) {
+      // 処理中会話をUIから必ず削除してスタックを防ぐ
+      Logger.debug('[AISA] processInProgressConversation失敗: $e');
+      conversationProvider?.removeProcessingConversation('0');
     });
 
     return;
@@ -1316,9 +1323,12 @@ class CaptureProvider extends ChangeNotifier
     final frames = List<List<int>>.from(_aisaFrameBuffer);
     _aisaFrameBuffer.clear();
     Logger.debug('[AISA] 文字起こし開始: ${frames.length}フレーム (codec: $_aisaCodec)');
+
+    // WAVファイルを追跡して例外発生時も確実に削除する（processAndSave呼び出し前の例外でリーク防止）
+    File? wavFile;
     try {
       final wavUtil = WavBytesUtil(codec: _aisaCodec, framesPerSecond: _aisaCodec.getFramesPerSecond());
-      final wavFile = await wavUtil.createWavByCodec(frames,
+      wavFile = await wavUtil.createWavByCodec(frames,
           filename: 'aisa_${DateTime.now().millisecondsSinceEpoch}.wav');
 
       // 無音検出: 声が含まれていない場合はAPIを呼ばない
@@ -1326,11 +1336,13 @@ class CaptureProvider extends ChangeNotifier
       final wavBytes = await wavFile.readAsBytes();
       if (!_hasVoiceActivity(wavBytes)) {
         Logger.debug('[AISA] VADスキップ: 無音と判定 (${wavBytes.length}bytes)');
-        await wavFile.delete();
-        return;
+        return; // finallyブロックで削除される
       }
 
-      final transcript = await AisaTranscriptionService.instance.processAndSave(wavFile);
+      // processAndSave は内部の finally でファイルを削除するため、ここで null にする
+      final fileToProcess = wavFile;
+      wavFile = null;
+      final transcript = await AisaTranscriptionService.instance.processAndSave(fileToProcess);
       if (transcript != null && transcript.trim().isNotEmpty) {
         _addAisaConversation(transcript);
       } else {
@@ -1338,6 +1350,11 @@ class CaptureProvider extends ChangeNotifier
       }
     } catch (e) {
       Logger.debug('[AISA] 音声処理失敗: $e');
+    } finally {
+      // processAndSave呼び出し前に例外が発生した場合にWAVファイルを削除
+      try {
+        if (wavFile != null && await wavFile.exists()) await wavFile.delete();
+      } catch (_) {}
     }
   }
 

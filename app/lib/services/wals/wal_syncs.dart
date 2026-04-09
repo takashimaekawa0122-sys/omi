@@ -332,10 +332,12 @@ class WalSyncs implements IWalSync {
   SyncLocalFilesResponse? get accumulatedResponse => _phoneSync.accumulatedResponse;
 
   /// Wait for internet connectivity to be restored (e.g. after WiFi transfer).
-  /// Polls every 2 seconds, gives up after 30 seconds.
+  /// Polls every 2 seconds, gives up after 60 seconds.
+  /// WiFi同期後にペンダントのAPからスマホのWiFiに戻るまで最大60秒待機する
+  /// （iOS のWiFi切り替えは環境によっては30秒以上かかる場合がある）
   Future<void> _waitForInternet() async {
     final connectivity = ConnectivityService();
-    for (int i = 0; i < 15; i++) {
+    for (int i = 0; i < 30; i++) {
       if (connectivity.isConnected) {
         Logger.debug("WalSyncs: Internet available after ${i * 2}s");
         DebugLogManager.logInfo('Internet restored after ${i * 2}s');
@@ -343,7 +345,7 @@ class WalSyncs implements IWalSync {
       }
       await Future.delayed(const Duration(seconds: 2));
     }
-    Logger.debug("WalSyncs: Internet not available after 30s, proceeding anyway");
-    DebugLogManager.logWarning('Internet not available after 30s, proceeding anyway');
+    Logger.debug("WalSyncs: Internet not available after 60s, proceeding anyway");
+    DebugLogManager.logWarning('Internet not available after 60s - WiFi復帰に時間がかかっています。クラウド同期が失敗する場合は手動で再同期してください。');
   }
 }

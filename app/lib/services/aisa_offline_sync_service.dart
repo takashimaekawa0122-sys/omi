@@ -136,7 +136,10 @@ class AisaOfflineSyncService {
       if (transcripts.isEmpty) continue;
 
       final combined = transcripts.join(' ');
-      _transcriptController.add(combined);
+      // dispose()後にstreamへの追加を試みると例外が発生するためガードする
+      if (!_transcriptController.isClosed) {
+        _transcriptController.add(combined);
+      }
       await AisaFirestoreService.instance.saveTranscript(combined);
       savedSessions++;
       debugPrint('[AISA Offline] ${sessionWals.length}チャンクを1件の会話として保存 '
