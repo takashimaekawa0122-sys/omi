@@ -319,9 +319,22 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
         Logger.debug('[AISA] 転送失敗 → リトライします (attempt $attempt/$maxRetries)');
       }
     } finally {
-      if (wasStreaming) {
-        Logger.debug('[AISA] SDカード同期後に音声ストリーミングを再開');
-        await _captureProvider!.streamDeviceRecording();
+      // SDカード同期中にBLE切断が発生した場合、再接続を試みる
+      // 再接続後に音声ストリーミングを再開する
+      if (wasStreaming && _captureProvider != null) {
+        try {
+          // デバイスが切断されていたら再接続を待つ
+          final deviceId = SharedPreferencesUtil().btDevice.id;
+          if (deviceId.isNotEmpty) {
+            await ServiceManager.instance().device.ensureConnection(deviceId, force: true);
+            // 再接続完了を待つ（BLEの安定化に少し時間が必要）
+            await Future.delayed(const Duration(seconds: 2));
+          }
+          Logger.debug('[AISA] SDカード同期後に音声ストリーミングを再開');
+          await _captureProvider!.streamDeviceRecording();
+        } catch (e) {
+          Logger.debug('[AISA] 同期後の再接続/ストリーミング再開失敗（自動再接続に委ねる）: $e');
+        }
       }
     }
   }

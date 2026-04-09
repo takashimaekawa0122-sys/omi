@@ -488,10 +488,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
       deviceProvider.onDeviceConnected = (BtDevice device) async {
         // 既存: ファームウェアアナウンス確認
         _onDeviceConnectedForAnnouncements(device);
-        // AISA: デバイス接続時はSDカード自動同期を行わない
-        // pauseAllNotifications()がBLE接続を不安定にし切断の原因となるため
-        // SDカード同期はユーザーが明示的に操作した時のみ実行する
-        // （ディスク上の未処理WALはSyncProvider._initializeProvider()で自動処理される）
+        // AISA: デバイス接続時に自動でSDカード同期を開始
+        // 同期中にBLE切断が発生しても、完了後に自動再接続する
+        if (!mounted) return;
+        if (!syncProvider.isSyncing) {
+          Logger.debug('[AISA] デバイス接続検知 → 自動SDカード同期開始');
+          await syncProvider.syncWalsViaBle();
+          // 同期完了後：BLE切断していたら再接続
+          if (!deviceProvider.isConnected && mounted) {
+            Logger.debug('[AISA] SDカード同期完了 → BLE再接続開始');
+            await deviceProvider.initiateConnection('aisa_post_sync');
+          }
+        }
       };
     });
   }
@@ -503,10 +511,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
       final syncProvider = Provider.of<SyncProvider>(context, listen: false);
       // ファームウェア >= 3.0.17 のデバイスではファイル数検出後に呼ばれる
       // BLE固定（WiFiはタイムアウトリスクあり）
-      deviceProvider.onOfflineDataDetected = (device, fileCount, totalBytes) {
-        // AISA: オフラインデータ検知時もSDカード自動同期を行わない
-        // BLE通知全停止による切断リスクを回避するため、ユーザー操作時のみ実行
-        Logger.debug('[AISA] オフラインデータ検知 ($fileCount件) - 手動同期待ち');
+      deviceProvider.onOfflineDataDetected = (device, fileCount, totalBytes) async {
+        if (!syncProvider.isSyncing) {
+          Logger.debug('[AISA] オフラインデータ検知 ($fileCount件) → 自動SDカード同期開始');
+          await syncProvider.syncWalsViaBle();
+          // 同期完了後：BLE切断していたら再接続
+          if (!deviceProvider.isConnected && mounted) {
+            Logger.debug('[AISA] SDカード同期完了 → BLE再接続開始');
+            await deviceProvider.initiateConnection('aisa_post_sync_offline');
+          }
+        }
       };
     });
   }
