@@ -326,13 +326,15 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
     }
   }
 
-  /// AISA自動同期用：BLEモード固定でSDカードデータをダウンロードする
-  /// 自動同期はBLEで行う（WiFiはタイムアウトリスクがあるため）
+  /// AISA自動同期用：WiFi対応デバイスならWiFiで、非対応ならBLEでSDカードデータをダウンロードする
+  /// WiFiはBLEより100〜1000倍高速（BLE: 1〜10KB/s → WiFi: 1MB/s以上）
   /// デバイス接続時・アプリ起動時に自動呼び出しされる
   Future<void> syncWalsViaBle() async {
     final previousMethod = SharedPreferencesUtil().preferredSyncMethod;
-    // BLEモード固定で同期（WiFiタイムアウト回避）
-    SharedPreferencesUtil().preferredSyncMethod = 'ble';
+    // WiFi対応デバイスならWiFiを優先（BLEは低速すぎて長時間録音に耐えられない）
+    final wifiSupported = await _walService.getSyncs().sdcard.isWifiSyncSupported();
+    SharedPreferencesUtil().preferredSyncMethod = wifiSupported ? 'wifi' : 'ble';
+    Logger.debug('[AISA] 自動同期: ${wifiSupported ? "WiFi" : "BLE"}モードで開始');
     try {
       await syncWals();
     } finally {
