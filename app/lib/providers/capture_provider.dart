@@ -1388,7 +1388,8 @@ class CaptureProvider extends ChangeNotifier
 
   void _addAisaConversation(String transcript) {
     if (conversationProvider == null) {
-      Logger.debug('[AISA] conversationProvider未初期化のためUI追加スキップ');
+      Logger.debug('[AISA] conversationProvider未初期化のためバッファに蓄積');
+      _pendingOfflineTranscripts.add(transcript);
       return;
     }
     final now = DateTime.now();

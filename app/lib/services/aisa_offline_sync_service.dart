@@ -141,8 +141,12 @@ class AisaOfflineSyncService {
 
       final combined = transcripts.join(' ');
       // dispose()後にstreamへの追加を試みると例外が発生するためガードする
-      if (!_transcriptController.isClosed) {
-        _transcriptController.add(combined);
+      try {
+        if (!_transcriptController.isClosed) {
+          _transcriptController.add(combined);
+        }
+      } catch (_) {
+        // dispose()直後のタイミングで発生しうるレースコンディションを無視
       }
       await AisaFirestoreService.instance.saveTranscript(combined);
       savedSessions++;
