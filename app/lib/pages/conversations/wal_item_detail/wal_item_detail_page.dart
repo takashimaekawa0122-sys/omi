@@ -276,9 +276,20 @@ class _WalItemDetailPageState extends State<WalItemDetailPage> {
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
                             Text(
-                              '${(transferProgress * 100).toInt()}%',
+                              () {
+                                final pct = transferProgress * 100;
+                                if (pct < 1.0) return '${pct.toStringAsFixed(1)}%';
+                                return '${pct.toInt()}%';
+                              }(),
                               style: TextStyle(color: Colors.grey.shade400, fontSize: 14, fontWeight: FontWeight.w500),
                             ),
+                            if (currentWal.storageTotalBytes > 0) ...[
+                              const SizedBox(width: 8),
+                              Text(
+                                '(${_formatBytes(currentWal.storageOffset)} / ${_formatBytes(currentWal.storageTotalBytes)})',
+                                style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
+                              ),
+                            ],
                             if (transferSpeedKBps != null && transferSpeedKBps > 0) ...[
                               const SizedBox(width: 16),
                               Text(
