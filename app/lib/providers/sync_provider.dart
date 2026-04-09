@@ -272,7 +272,9 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
         final connection = await ServiceManager.instance().device.ensureConnection(deviceId);
         if (connection != null) {
           final transport = connection.transport;
-          if (transport is dynamic && transport.runtimeType.toString().contains('NativeBle')) {
+          // NativeBleTransportかどうかをruntimeTypeで確認してからdynamicキャスト
+          // 注: `transport is dynamic` は常にtrueのため使わない
+          if (transport.runtimeType.toString().contains('NativeBle')) {
             await (transport as dynamic).pauseAllNotifications();
             Logger.debug('[AISA] BLE通知全解除完了');
           }

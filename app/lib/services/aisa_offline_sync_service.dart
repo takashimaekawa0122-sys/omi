@@ -106,6 +106,7 @@ class AisaOfflineSyncService {
     }
 
     // 同一録音セッションのチャンクを結合して1件の会話として保存
+    // キャンセル済みでも収集済みのテキストは保存する（途中までの内容を失わないため）
     final sessions = _groupWalsBySession(diskWals);
     int savedSessions = 0;
     for (final sessionWals in sessions) {
@@ -122,7 +123,8 @@ class AisaOfflineSyncService {
       await AisaFirestoreService.instance.saveTranscript(combined);
       savedSessions++;
       debugPrint('[AISA Offline] ${sessionWals.length}チャンクを1件の会話として保存 '
-          '(${combined.length}文字, ${sessionWals.first.timerStart})');
+          '(${combined.length}文字, ${sessionWals.first.timerStart})'
+          '${_isCancelled ? " [キャンセル後の残存データ]" : ""}');
     }
 
     debugPrint('[AISA Offline] ${diskWals.length}チャンク処理完了 → $savedSessions件の会話として保存 '

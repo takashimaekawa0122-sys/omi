@@ -375,8 +375,17 @@ class SDCardWalSyncImpl implements SDCardWalSync {
               'offset': offset,
               'framesReceived': bytesData.length,
             });
-            await _writeToStorage(deviceId, fileNum, 0, offset);
-            _resetInactivityTimer(); // 再送後に再びタイマーをセット
+            // 再送コマンドの例外を必ずCompleterに伝える（黙って飲まない）
+            try {
+              await _writeToStorage(deviceId, fileNum, 0, offset);
+              _resetInactivityTimer(); // 再送後に再びタイマーをセット
+            } catch (e) {
+              hasError = true;
+              Logger.debug('[AISA] 再送コマンド失敗: $e');
+              if (!completer.isCompleted) {
+                completer.completeError(e);
+              }
+            }
           } else {
             hasError = true;
             final msg = bytesData.isNotEmpty
@@ -580,8 +589,17 @@ class SDCardWalSyncImpl implements SDCardWalSync {
             DebugLogManager.logWarning('SD card BLE WithMarkers: mid-transfer inactivity, re-commanding', {
               'retry': midTransferRetryCount, 'offset': offset, 'frames': bytesData.length,
             });
-            await _writeToStorage(deviceId, fileNum, 0, offset);
-            _resetInactivityTimerMarkers();
+            // 再送コマンドの例外を必ずCompleterに伝える（黙って飲まない）
+            try {
+              await _writeToStorage(deviceId, fileNum, 0, offset);
+              _resetInactivityTimerMarkers();
+            } catch (e) {
+              hasError = true;
+              Logger.debug('[AISA] WithMarkers再送コマンド失敗: $e');
+              if (!completer.isCompleted) {
+                completer.completeError(e);
+              }
+            }
           } else {
             hasError = true;
             final msg = bytesData.isNotEmpty
