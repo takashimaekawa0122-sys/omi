@@ -350,6 +350,81 @@ func registerPlugins(registry: FlutterPluginRegistry) {
   GeneratedPluginRegistrant.register(with: registry)
 }
 
+// MARK: - AISA Background Survival
+// iOSはバックグラウンドのアプリを数分以内に殺す。
+// AVAudioEngineで無音PCMバッファを無限ループ再生し、
+// iOSに「音声を再生中のアプリ」と認識させて強制終了を防ぐ。
+// silence.wavファイルを必要としないため、Xcodeプロジェクトへの
+// リソース追加が不要（xcodeproj gem依存を回避）。
+// Info.plistの UIBackgroundModes に "audio" が必要（設定済み）。
+// バッテリー影響：無音再生のため実質ゼロ。
+class AisaBackgroundAudio: NSObject {
+    static let shared = AisaBackgroundAudio()
+
+    private let engine = AVAudioEngine()
+    private let playerNode = AVAudioPlayerNode()
+    private var isRunning = false
+
+    private override init() {
+        super.init()
+    }
+
+    /// サイレント音声ループを開始してバックグラウンド生存を確保する
+    func start() {
+        guard !isRunning else { return }
+
+        // AudioSessionをバックグラウンド再生用に設定
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setCategory(
+                .playback,
+                mode: .default,
+                options: [.mixWithOthers]  // 他のアプリの音声と共存
+            )
+            try session.setActive(true)
+        } catch {
+            NSLog("[AISA BackgroundAudio] AudioSession設定失敗: \(error)")
+            return
+        }
+
+        // 無音PCMバッファを生成（1秒 @ 44.1kHz mono）
+        let sampleRate: Double = 44100
+        let frameCount: AVAudioFrameCount = 44100
+        guard let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1),
+              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else {
+            NSLog("[AISA BackgroundAudio] PCMバッファ生成失敗")
+            return
+        }
+        buffer.frameLength = frameCount
+        // AVAudioPCMBufferは初期化時にゼロ埋めされるため追加処理不要
+
+        engine.attach(playerNode)
+        engine.connect(playerNode, to: engine.mainMixerNode, format: format)
+
+        // 無限ループスケジュール
+        playerNode.scheduleBuffer(buffer, at: nil, options: .loops, completionHandler: nil)
+
+        do {
+            try engine.start()
+            playerNode.volume = 0.0
+            playerNode.play()
+            isRunning = true
+            NSLog("[AISA BackgroundAudio] サイレントループ開始")
+        } catch {
+            NSLog("[AISA BackgroundAudio] エンジン起動失敗: \(error)")
+        }
+    }
+
+    /// サイレント音声ループを停止する
+    func stop() {
+        guard isRunning else { return }
+        playerNode.stop()
+        engine.stop()
+        isRunning = false
+        NSLog("[AISA BackgroundAudio] サイレントループ停止")
+    }
+}
+
 extension AppDelegate: WCSessionDelegate {
     
     func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) { }

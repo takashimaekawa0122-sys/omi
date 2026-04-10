@@ -113,36 +113,6 @@ cp setup/prebuilt/GoogleService-Info.plist ios/Config/Dev/GoogleService-Info.pli
 cp setup/prebuilt/GoogleService-Info.plist ios/Config/Prod/GoogleService-Info.plist
 cp setup/prebuilt/GoogleService-Info.plist ios/Runner/GoogleService-Info.plist
 
-# AISA: Xcodeプロジェクトに新規ファイルを登録（未登録の場合のみ）
-if ! grep -q "AisaBackgroundAudio.swift" ios/Runner.xcodeproj/project.pbxproj 2>/dev/null; then
-  echo "📎 AisaBackgroundAudio.swift と silence.wav をXcodeプロジェクトに追加..."
-  ruby - <<'RUBY' 2>/dev/null || echo "⚠️  xcodeproj gem未インストール。手動でXcodeからファイルを追加してください。"
-require 'xcodeproj'
-project = Xcodeproj::Project.open('ios/Runner.xcodeproj')
-target = project.targets.find { |t| t.name == 'Runner' }
-group = project.main_group.find_subpath('Runner', true)
-
-# AisaBackgroundAudio.swift
-swift_path = 'Runner/AisaBackgroundAudio.swift'
-unless group.files.any? { |f| f.path == 'AisaBackgroundAudio.swift' }
-  ref = group.new_file(swift_path)
-  target.source_build_phase.add_file_reference(ref)
-  puts "  + AisaBackgroundAudio.swift"
-end
-
-# silence.wav
-wav_path = 'Runner/silence.wav'
-unless group.files.any? { |f| f.path == 'silence.wav' }
-  ref = group.new_file(wav_path)
-  target.resources_build_phase.add_file_reference(ref)
-  puts "  + silence.wav"
-end
-
-project.save
-puts "  ✅ Xcodeプロジェクト更新完了"
-RUBY
-fi
-
 cd ios && pod install && cd ..
 
 flutter build ios --flavor dev --release --no-codesign \
