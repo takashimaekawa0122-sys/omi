@@ -312,18 +312,20 @@ class SDCardWalSyncImpl implements SDCardWalSync {
 
   Future _readStorageBytesToFile(
     Wal wal,
-    Function(File f, int offset, int timerStart, int chunkFrames) callback,
-  ) async {
+    Function(File f, int offset, int timerStart, int chunkFrames) callback, {
+    Function(int offset)? onProgress,
+  }) async {
     if (_supportsTimestampMarkers()) {
-      return _readStorageBytesToFileWithMarkers(wal, callback);
+      return _readStorageBytesToFileWithMarkers(wal, callback, onProgress: onProgress);
     }
-    return _readStorageBytesToFileLegacy(wal, callback);
+    return _readStorageBytesToFileLegacy(wal, callback, onProgress: onProgress);
   }
 
   Future _readStorageBytesToFileLegacy(
     Wal wal,
-    Function(File f, int offset, int timerStart, int chunkFrames) callback,
-  ) async {
+    Function(File f, int offset, int timerStart, int chunkFrames) callback, {
+    Function(int offset)? onProgress,
+  }) async {
     var deviceId = wal.device;
     int fileNum = wal.fileNum;
     int offset = wal.storageOffset;
@@ -350,6 +352,20 @@ class SDCardWalSyncImpl implements SDCardWalSync {
     // → 現在のoffsetで読み取りコマンドを再送することで転送を再開できる
     int midTransferRetryCount = 0;
     const maxMidTransferRetries = 3;
+
+    // AISA: ライブ進捗スロットリング用タイムスタンプ
+    // BLE通知は毎秒数十〜数百回来るため、setStateを抑制するため250ms間隔に間引く
+    DateTime lastProgressEmit = DateTime.fromMillisecondsSinceEpoch(0);
+    void emitLiveProgress() {
+      if (onProgress == null) return;
+      final now = DateTime.now();
+      if (now.difference(lastProgressEmit).inMilliseconds >= 250) {
+        lastProgressEmit = now;
+        try {
+          onProgress(offset);
+        } catch (_) {}
+      }
+    }
 
     void _resetInactivityTimer() {
       inactivityTimer?.cancel();
@@ -472,6 +488,7 @@ class SDCardWalSyncImpl implements SDCardWalSync {
           var amount = value[3];
           bytesData.add(value.sublist(4, 4 + amount));
           offset += 80;
+          emitLiveProgress();
         } else if (value.length == 440) {
           var packageOffset = 0;
           while (packageOffset < value.length - 1) {
@@ -488,6 +505,7 @@ class SDCardWalSyncImpl implements SDCardWalSync {
             packageOffset += packageSize + 1;
           }
           offset += value.length;
+          emitLiveProgress();
         }
       },
     );
@@ -516,6 +534,11 @@ class SDCardWalSyncImpl implements SDCardWalSync {
       inactivityTimer?.cancel();  // アイドルタイマーも必ずキャンセル
       dataStartTimer?.cancel();   // リトライタイマーも必ずキャンセル
     }
+
+    // 転送完了時に最終offsetで確定進捗を通知
+    try {
+      onProgress?.call(offset);
+    } catch (_) {}
 
     // After download: compute accurate duration from actual frame count
     if (!hasError && bytesData.isNotEmpty) {
@@ -552,8 +575,9 @@ class SDCardWalSyncImpl implements SDCardWalSync {
 
   Future _readStorageBytesToFileWithMarkers(
     Wal wal,
-    Function(File f, int offset, int timerStart, int chunkFrames) callback,
-  ) async {
+    Function(File f, int offset, int timerStart, int chunkFrames) callback, {
+    Function(int offset)? onProgress,
+  }) async {
     var deviceId = wal.device;
     int fileNum = wal.fileNum;
     int offset = wal.storageOffset;
@@ -574,6 +598,19 @@ class SDCardWalSyncImpl implements SDCardWalSync {
     Timer? inactivityTimer;
     int midTransferRetryCount = 0;
     const maxMidTransferRetries = 3;
+
+    // AISA: ライブ進捗スロットリング用
+    DateTime lastProgressEmitM = DateTime.fromMillisecondsSinceEpoch(0);
+    void emitLiveProgressM() {
+      if (onProgress == null) return;
+      final now = DateTime.now();
+      if (now.difference(lastProgressEmitM).inMilliseconds >= 250) {
+        lastProgressEmitM = now;
+        try {
+          onProgress(offset);
+        } catch (_) {}
+      }
+    }
 
     void _resetInactivityTimerMarkers() {
       inactivityTimer?.cancel();
@@ -654,6 +691,7 @@ class SDCardWalSyncImpl implements SDCardWalSync {
           var amount = value[3];
           bytesData.add(value.sublist(4, 4 + amount));
           offset += 80;
+          emitLiveProgressM();
         } else if (value.length == 440) {
           var packageOffset = 0;
           while (packageOffset < value.length - 1) {
@@ -684,6 +722,7 @@ class SDCardWalSyncImpl implements SDCardWalSync {
             packageOffset += packageSize + 1;
           }
           offset += value.length;
+          emitLiveProgressM();
         }
 
         // Find the next marker boundary (if any) after bytesLeft
@@ -830,26 +869,43 @@ class SDCardWalSyncImpl implements SDCardWalSync {
     _totalBytesDownloaded = 0;
 
     try {
-      await _readStorageBytesToFile(wal, (File file, int offset, int timerStart, int chunkFrames) async {
-        if (_isCancelled) {
-          throw Exception('Sync cancelled by user');
-        }
+      // AISA: ライブ進捗用の最後のoffset（onProgressの差分計算に使う）
+      int liveLastOffset = lastOffset;
+      await _readStorageBytesToFile(
+        wal,
+        (File file, int offset, int timerStart, int chunkFrames) async {
+          if (_isCancelled) {
+            throw Exception('Sync cancelled by user');
+          }
 
-        int bytesInChunk = offset - lastOffset;
-        _updateSpeed(bytesInChunk);
-        await _registerSingleChunk(wal, file, timerStart, chunkFrames);
-        chunksDownloaded++;
-        lastOffset = offset;
+          int bytesInChunk = offset - lastOffset;
+          _updateSpeed(bytesInChunk);
+          await _registerSingleChunk(wal, file, timerStart, chunkFrames);
+          chunksDownloaded++;
+          lastOffset = offset;
 
-        listener.onWalUpdated();
-        if (updates != null) {
-          updates(offset, _currentSpeedKBps);
-        }
+          listener.onWalUpdated();
+          if (updates != null) {
+            updates(offset, _currentSpeedKBps);
+          }
 
-        Logger.debug(
-          "SDCard: Chunk $chunksDownloaded downloaded (ts: $timerStart, speed: ${_currentSpeedKBps.toStringAsFixed(1)} KB/s)",
-        );
-      });
+          Logger.debug(
+            "SDCard: Chunk $chunksDownloaded downloaded (ts: $timerStart, speed: ${_currentSpeedKBps.toStringAsFixed(1)} KB/s)",
+          );
+        },
+        // AISA: BLE受信中にリアルタイムでUI進捗を更新する
+        // 既存の chunk callback はファイル単位の登録用途で頻度が低く、
+        // legacy経路では全データ受信後まで呼ばれないため進捗が0%のままだった。
+        onProgress: (int liveOffset) {
+          int deltaBytes = liveOffset - liveLastOffset;
+          if (deltaBytes <= 0) return;
+          liveLastOffset = liveOffset;
+          _updateSpeed(deltaBytes);
+          if (updates != null) {
+            updates(liveOffset, _currentSpeedKBps);
+          }
+        },
+      );
     } catch (e) {
       await _storageStream?.cancel();
       Logger.debug('SDCard download failed: $e');
