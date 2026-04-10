@@ -29,8 +29,13 @@ class WifiNetworkPlugin: NSObject, CLLocationManagerDelegate {
     // Connection state
     private var connectLoop = false
     private var connectionStartTime: Date?
-    private static let connectionTimeout: TimeInterval = 30.0
-    private static let retryInterval: TimeInterval = 3.0
+    // 12秒で SSID 照合を諦めて楽観的に成功を返す。
+    // iOS が自宅 WiFi を掴み続けている場合でも、ここで失敗させず
+    // 下流の TCP 接続試行（60秒）で本物の失敗を検知させる。
+    // 自宅 WiFi と Omi AP で fetchCurrent がどちらを返すかは iOS バージョン
+    // やキャッシュで不安定なため、SSID 照合を authoritative にしない。
+    private static let connectionTimeout: TimeInterval = 12.0
+    private static let retryInterval: TimeInterval = 2.0
 
     init(messenger: FlutterBinaryMessenger) {
         channel = FlutterMethodChannel(name: "com.omi.wifi_network", binaryMessenger: messenger)
@@ -149,10 +154,12 @@ class WifiNetworkPlugin: NSObject, CLLocationManagerDelegate {
         if let startTime = connectionStartTime {
             let elapsed = Date().timeIntervalSince(startTime)
             if elapsed >= WifiNetworkPlugin.connectionTimeout {
-                NSLog("WifiNetworkPlugin: Connection timeout after \(elapsed) seconds")
+                NSLog("WifiNetworkPlugin: SSID verification window elapsed (\(elapsed)s) — returning optimistic success; TCP will be the real test")
+                // apply() が成功している場合、iOS は Omi AP の設定を保存済み。
+                // ただし自宅 WiFi を掴み続けている可能性もあるため、
+                // 最終判定は下流の TCP 接続試行に任せる。
                 connectLoop = false
-                NEHotspotConfigurationManager.shared.removeConfiguration(forSSID: ssid)
-                result(["success": false, "error": "Connection timeout. Please try again.", "errorCode": -2])
+                result(["success": true])
                 return
             }
         }
@@ -252,17 +259,17 @@ class WifiNetworkPlugin: NSObject, CLLocationManagerDelegate {
             let elapsed = Date().timeIntervalSince(startTime)
 
             if elapsed >= WifiNetworkPlugin.connectionTimeout {
-                NSLog("WifiNetworkPlugin: Connection timeout after \(elapsed) seconds")
-                self.connectLoop = false
-                NEHotspotConfigurationManager.shared.removeConfiguration(forSSID: ssid)
-
-                let errorMsg: String
+                // SSID 照合では確認できなかったが、apply() は成功している。
+                // iOS が自宅 WiFi を掴み続けているケースもあるが、iOS の
+                // ネットワークスタックが遅延して切り替えている可能性もあるため、
+                // ここで失敗にせず TCP 接続試行 (60秒) を真の判定に使う。
                 if let current = currentSSID {
-                    errorMsg = "Phone stayed on '\(current)' instead of switching to device WiFi."
+                    NSLog("WifiNetworkPlugin: SSID still '\(current)' after \(elapsed)s (expected '\(ssid)') — returning optimistic success; TCP will verify")
                 } else {
-                    errorMsg = "Failed to join device WiFi network."
+                    NSLog("WifiNetworkPlugin: SSID nil after \(elapsed)s — returning optimistic success; TCP will verify")
                 }
-                result(["success": false, "error": errorMsg, "errorCode": 5])
+                self.connectLoop = false
+                result(["success": true])
                 return
             }
 
