@@ -212,7 +212,8 @@ class AisaTranscriptionService {
     // 短すぎるテキスト（3文字以下）は意味のある発話ではない可能性が高い
     if (t.length <= 3) return true;
 
-    const hallucinations = [
+    // 完全一致・末尾句読点バリエーション用の定型ハルシネーション
+    const exactHallucinations = [
       'ご視聴ありがとうございました',
       'ご視聴ありがとうございます',
       'チャンネル登録お願いします',
@@ -224,20 +225,33 @@ class AisaTranscriptionService {
       'ご清聴ありがとうございました',
       '最後までご視聴ありがとうございました',
       'いい加減にしろ',
-      'ペンダント型マイクで録音した音声を聞いてみましょう',
-      'これはペンダント型マイクで録音した音声です',
-      'マイクに近い話者の声のみ文字起こしします',
-      '句読点を含めて正確に文字起こしします',
-      '背景音やノイズは無視してください',
       'Thanks for watching',
       'Thank you for watching',
       'Subscribe',
       'Bye bye',
       'Goodbye',
     ];
-    for (final h in hallucinations) {
-      if (t == h || t == '$h。' || t == '$h！') return true;
+    for (final h in exactHallucinations) {
+      if (t == h || t == '$h。' || t == '$h！' || t == '$h.') return true;
     }
+
+    // プロンプトエコー系は部分一致で判定する
+    // Whisperが送信プロンプトの単語をそのまま出力に混ぜるケースがあり、
+    // 「ペンダント型マイクで録音した音声を、ペンダント型マイクで再生してください」のような
+    // 微妙にバリエーションした派生を完全一致では捕まえられないため。
+    const substringHallucinations = [
+      'ペンダント型マイク',
+      'ペンダントマイク',
+      '句読点を含めて正確に文字起こし',
+      '背景音やノイズは無視',
+      'マイクに近い話者',
+      '音声を聞いてみましょう',
+      '録音した音声を',
+    ];
+    for (final h in substringHallucinations) {
+      if (t.contains(h)) return true;
+    }
+
     return false;
   }
 

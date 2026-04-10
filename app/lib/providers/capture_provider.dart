@@ -1408,8 +1408,12 @@ class CaptureProvider extends ChangeNotifier
     }
     if (count == 0) return false;
     final rms = sqrt(sumSquares / count);
-    AisaDebugLogger.instance.info('VAD: RMS=${rms.toStringAsFixed(1)} (閾値=100) → ${rms > 100 ? "通過" : "スキップ"}');
-    return rms > 100; // 100未満は無音/ノイズ（ペンダントマイクは近距離のため100で十分）
+    // 閾値150: 100だと低音量TV・BGMを通してしまいWhisperハルシネーションを誘発する。
+    // ペンダントマイクで実際に話した声は近距離のため通常RMS 300〜2000。
+    // 150に引き上げても自声の取りこぼしはほぼ無く、環境音起因のハルシネーションを削減できる。
+    const threshold = 150.0;
+    AisaDebugLogger.instance.info('VAD: RMS=${rms.toStringAsFixed(1)} (閾値=$threshold) → ${rms > threshold ? "通過" : "スキップ"}');
+    return rms > threshold;
   }
 
   // AISA: 会話ID生成用カウンター（同一ミリ秒での重複IDを防ぐ）
