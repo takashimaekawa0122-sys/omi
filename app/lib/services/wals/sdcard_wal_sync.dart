@@ -18,6 +18,7 @@ import 'package:omi/services/services.dart';
 import 'package:omi/services/wals/wal.dart';
 import 'package:omi/services/wals/wal_interfaces.dart';
 import 'package:omi/services/wifi/wifi_network_service.dart';
+import 'package:omi/utils/aisa_debug_logger.dart';
 
 class SDCardWalSyncImpl implements SDCardWalSync {
   List<Wal> _wals = const [];
@@ -1282,6 +1283,7 @@ class SDCardWalSyncImpl implements SDCardWalSync {
     final ssid = WifiNetworkService.generateSsid(deviceId);
     final password = WifiNetworkService.generatePassword(deviceId);
     debugPrint("SDCardWalSync WiFi: Starting sync with device AP SSID: $ssid (deviceId: $deviceId)");
+    AisaDebugLogger.instance.info('🛰 WiFi同期開始: SSID=$ssid');
 
     var connection = await ServiceManager.instance().device.ensureConnection(deviceId);
     if (connection == null) {
@@ -1301,6 +1303,7 @@ class SDCardWalSyncImpl implements SDCardWalSync {
       connectionListener?.onEnablingDeviceWifi();
 
       debugPrint("SDCardWalSync WiFi: Step 1 - Configuring device AP with SSID: $ssid");
+      AisaDebugLogger.instance.info('WiFi[1/6]: ペンダントにAP設定を送信');
       var setupResult = await connection.setupWifiSync(ssid, password);
 
       // If a previous session is still running, stop it and retry
@@ -1318,6 +1321,7 @@ class SDCardWalSyncImpl implements SDCardWalSync {
         DebugLogManager.logError('SD card WiFi setup failed: $errorMessage', null, null, {
           'errorCode': errorCode?.code.toRadixString(16) ?? 'none',
         });
+        AisaDebugLogger.instance.error('❌ WiFi[1/6] セットアップ失敗: $errorMessage (code=${errorCode?.code.toRadixString(16) ?? "none"})');
         if (errorCode != null) {
           debugPrint(
             "SDCardWalSync WiFi: Setup failed with error code 0x${errorCode.code.toRadixString(16)}: ${errorCode.userMessage}",
@@ -1329,47 +1333,60 @@ class SDCardWalSyncImpl implements SDCardWalSync {
           throw WifiSyncException(errorMessage);
         }
       }
+      AisaDebugLogger.instance.info('WiFi[1/6]: セットアップ成功 ✅');
 
       debugPrint("SDCardWalSync WiFi: Step 2 - Waiting 2 seconds before sending start command...");
+      AisaDebugLogger.instance.info('WiFi[2/6]: 2秒待機');
       await Future.delayed(const Duration(seconds: 2));
 
+      AisaDebugLogger.instance.info('WiFi[3/6]: startWifiSync コマンド送信');
       final startSuccess = await connection.startWifiSync();
       if (!startSuccess) {
         _resetSyncState();
+        AisaDebugLogger.instance.error('❌ WiFi[3/6] startWifiSync 失敗');
         connectionListener?.onConnectionFailed('Failed to start device WiFi');
         throw WifiSyncException('Failed to start device WiFi AP');
       }
+      AisaDebugLogger.instance.info('WiFi[3/6]: start成功 ✅');
 
       // Notify: Connecting to device
       connectionListener?.onConnectingToDevice();
 
       // Wait for device to set up its WiFi AP before phone tries to connect
       debugPrint("SDCardWalSync WiFi: Step 3 - Waiting for device AP to become available...");
+      AisaDebugLogger.instance.info('WiFi[4/6]: ペンダントAP起動待機 8秒');
       await Future.delayed(const Duration(seconds: 8));
 
       debugPrint("SDCardWalSync WiFi: Step 4 - Connecting phone to device WiFi AP");
+      AisaDebugLogger.instance.info('WiFi[5/6]: iPhone→AP接続開始');
       final wifiResult = await wifiNetwork.connectToAp(ssid, password: password);
       if (!wifiResult.success) {
         await _cleanupWifiSync(null, wifiNetwork, ssid, connection, deviceId: deviceId);
         final errorMsg = wifiResult.errorMessage ?? wifiResult.error?.userMessage ?? 'Failed to connect to device WiFi';
         DebugLogManager.logError('SD card WiFi AP connection failed: $errorMsg', null, null);
+        AisaDebugLogger.instance.error('❌ WiFi[5/6] AP接続失敗: $errorMsg');
         connectionListener?.onConnectionFailed(errorMsg);
         throw WifiSyncException('WiFi connection failed: $errorMsg');
       }
+      AisaDebugLogger.instance.info('WiFi[5/6]: AP接続OK (楽観判定の可能性あり)');
 
       // Step 6: Start TCP server and wait for device to connect
       const tcpPort = 12345;
       debugPrint("SDCardWalSync WiFi: Step 6 - Starting TCP server on port $tcpPort");
+      AisaDebugLogger.instance.info('WiFi[6/6]: TCPサーバー起動 port=$tcpPort, 60秒待機');
       tcpTransport = TcpTransport(deviceId, port: tcpPort, connectionTimeout: const Duration(seconds: 60));
       _activeTcpTransport = tcpTransport;
       try {
         await tcpTransport.connect();
         debugPrint("SDCardWalSync WiFi: Device connected to TCP server!");
+        AisaDebugLogger.instance.info('✅ WiFi同期: TCP接続成功 - 高速転送開始');
         // Notify: Connected successfully
         connectionListener?.onConnected();
       } catch (e) {
         debugPrint("SDCardWalSync WiFi: TCP server error: $e");
         DebugLogManager.logError(e, null, 'SD card WiFi TCP connection failed: ${e.toString()}');
+        AisaDebugLogger.instance.error('❌ WiFi[6/6] TCP接続失敗: $e');
+        AisaDebugLogger.instance.error('  → iPhoneがOmi APに繋がっていない可能性大。iOS設定→WiFiで $ssid を確認');
         await _cleanupWifiSync(tcpTransport, wifiNetwork, ssid, connection, deviceId: deviceId);
         connectionListener?.onConnectionFailed('Device did not connect');
         throw WifiSyncException('Device did not connect to TCP server: $e');
