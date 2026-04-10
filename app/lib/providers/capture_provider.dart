@@ -941,6 +941,35 @@ class CaptureProvider extends ChangeNotifier
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.paused || state == AppLifecycleState.detached) {
       _triggerAisaTranscription();
+    } else if (state == AppLifecycleState.resumed) {
+      // AISA: フォアグラウンド復帰時にBLE再接続＋音声ストリーミング再開
+      // バックグラウンドでBLEを切断してSDカード録音させているため、
+      // フォアグラウンドに戻ったらリアルタイム文字起こしを再開する
+      _resumeAfterBackground();
+    }
+  }
+
+  Future<void> _resumeAfterBackground() async {
+    try {
+      final deviceId = SharedPreferencesUtil().btDevice.id;
+      if (deviceId.isEmpty) return;
+
+      Logger.debug('[AISA] フォアグラウンド復帰 → BLE再接続開始');
+      AisaDebugLogger.instance.info('フォアグラウンド復帰 → BLE再接続開始');
+
+      await ServiceManager.instance().device.ensureConnection(deviceId, force: true);
+      // BLE接続が安定するまで少し待つ
+      await Future.delayed(const Duration(seconds: 2));
+
+      // 音声ストリーミングを再開
+      if (_recordingDevice != null || SharedPreferencesUtil().btDevice.id.isNotEmpty) {
+        await streamDeviceRecording();
+        Logger.debug('[AISA] 音声ストリーミング再開完了');
+        AisaDebugLogger.instance.info('音声ストリーミング再開完了');
+      }
+    } catch (e) {
+      Logger.debug('[AISA] フォアグラウンド復帰処理失敗（自動再接続に委ねる）: $e');
+      AisaDebugLogger.instance.warning('⚠ フォアグラウンド復帰失敗: $e');
     }
   }
 

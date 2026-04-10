@@ -168,6 +168,9 @@ extension FlutterError: Error {}
       UNUserNotificationCenter.current().delegate = self as? UNUserNotificationCenterDelegate
     }
 
+    // AISA: サイレント音声ループを開始してバックグラウンドでアプリが殺されないようにする
+    AisaBackgroundAudio.shared.start()
+
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
 
@@ -249,6 +252,10 @@ extension FlutterError: Error {}
     // ペンダントがBLE切断を検知してSDカード録音モードに移行できる。
     NSLog("[AISA] applicationDidEnterBackground → disconnectAllPeripherals")
     OmiBleManager.shared.disconnectAllPeripherals()
+
+    // サイレント音声ループが確実に動いていることを保証
+    // （バックグラウンドでiOSにアプリを殺されないようにする）
+    AisaBackgroundAudio.shared.start()
   }
 
   override func applicationWillTerminate(_ application: UIApplication) {
