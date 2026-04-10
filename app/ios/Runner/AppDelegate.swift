@@ -247,11 +247,12 @@ extension FlutterError: Error {}
 
   override func applicationDidEnterBackground(_ application: UIApplication) {
     super.applicationDidEnterBackground(application)
-    // アプリがバックグラウンドに入るたびにBLEを明示的に切断。
-    // これにより didDisconnectPeripheral で isManual=true となり自動再接続が抑制され、
-    // ペンダントがBLE切断を検知してSDカード録音モードに移行できる。
-    NSLog("[AISA] applicationDidEnterBackground → disconnectAllPeripherals")
-    OmiBleManager.shared.disconnectAllPeripherals()
+    // アプリがバックグラウンドに入るときBLEを切断（バックグラウンド専用フラグ）。
+    // disconnectForBackground() は manuallyDisconnected ではなく backgroundDisconnected にフラグを立てる。
+    // これによりペンダントはSDカード録音モードに移行でき、
+    // フォアグラウンド復帰時に connectPeripheral() で再接続が可能になる。
+    NSLog("[AISA] applicationDidEnterBackground → disconnectForBackground")
+    OmiBleManager.shared.disconnectForBackground()
 
     // サイレント音声ループが確実に動いていることを保証
     // （バックグラウンドでiOSにアプリを殺されないようにする）

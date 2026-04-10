@@ -63,8 +63,8 @@ class NativeBleTransport extends DeviceTransport {
 
     try {
       _services = await _deviceReadyCompleter!.future.timeout(
-        const Duration(seconds: 60),
-        onTimeout: () => throw TimeoutException('Device ready timeout after 60s'),
+        const Duration(seconds: 30),
+        onTimeout: () => throw TimeoutException('Device ready timeout after 30s'),
       );
       _deviceReadyCompleter = null;
       _updateState(DeviceTransportState.connected);

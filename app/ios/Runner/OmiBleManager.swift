@@ -30,6 +30,13 @@ final class OmiBleManager: NSObject {
     /// Whether the user explicitly disconnected (suppress auto-reconnect).
     private var manuallyDisconnected: Set<String> = []
 
+    /// Whether disconnect was caused by app backgrounding (not a true manual disconnect).
+    /// フォアグラウンド復帰時の再接続を許可するため、manual disconnectとは区別する。
+    private var backgroundDisconnected: Set<String> = []
+
+    /// Service discovery timeout timers per peripheral UUID.
+    private var serviceDiscoveryTimers: [String: Timer] = [:]
+
     /// RSSI keep-alive timer — periodic reads prevent connection supervision timeout.
     private var rssiTimer: Timer?
 
@@ -110,6 +117,7 @@ final class OmiBleManager: NSObject {
 
     func connectPeripheral(uuid: String) {
         manuallyDisconnected.remove(uuid)
+        backgroundDisconnected.remove(uuid)
 
         if let peripheral = peripherals[uuid] {
             if peripheral.state == .connected {
@@ -142,6 +150,17 @@ final class OmiBleManager: NSObject {
             manuallyDisconnected.insert(uuid)
             centralManager.cancelPeripheralConnection(peripheral)
         }
+    }
+
+    /// バックグラウンド移行時専用の切断。
+    /// manuallyDisconnected ではなく backgroundDisconnected にフラグを立てる。
+    /// フォアグラウンド復帰時に connectPeripheral を呼べば再接続が可能。
+    func disconnectForBackground() {
+        for (uuid, peripheral) in peripherals {
+            backgroundDisconnected.insert(uuid)
+            centralManager.cancelPeripheralConnection(peripheral)
+        }
+        NSLog("[OmiBle] disconnectForBackground: \(peripherals.count) devices")
     }
 
     func isPeripheralConnected(uuid: String) -> Bool {
@@ -420,6 +439,25 @@ extension OmiBleManager: CBCentralManagerDelegate {
 
         peripheral.delegate = self
         peripheral.discoverServices(nil)
+
+        // サービス発見タイムアウト (15秒)
+        // 特性発見が完了しない場合にハングを防止する
+        serviceDiscoveryTimers[uuid]?.invalidate()
+        serviceDiscoveryTimers[uuid] = Timer.scheduledTimer(withTimeInterval: 15.0, repeats: false) { [weak self] _ in
+            guard let self = self else { return }
+            NSLog("[OmiBle] ⚠ Service discovery timeout (15s) for \(uuid), forcing onDeviceReady")
+            self.serviceDiscoveryTimers.removeValue(forKey: uuid)
+            // 発見済みのサービスだけでDeviceReadyを通知
+            let services = peripheral.services ?? []
+            let bleServices = services.map { svc in
+                BleService(
+                    uuid: self.fullUuidString(svc.uuid),
+                    characteristicUuids: svc.characteristics?.map { self.fullUuidString($0.uuid) } ?? []
+                )
+            }
+            self.flutterApi?.onDeviceReady(peripheralUuid: uuid, services: bleServices) { _ in }
+            self.startRssiKeepAlive(for: peripheral)
+        }
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
@@ -432,11 +470,14 @@ extension OmiBleManager: CBCentralManagerDelegate {
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         let uuid = peripheralUuidString(peripheral)
         let isManual = manuallyDisconnected.contains(uuid)
-        NSLog("[OmiBle] didDisconnect: \(peripheral.name ?? "<nil>"), uuid=\(uuid), error=\(error?.localizedDescription ?? "nil")")
+        let isBackground = backgroundDisconnected.contains(uuid)
+        NSLog("[OmiBle] didDisconnect: \(peripheral.name ?? "<nil>"), uuid=\(uuid), isManual=\(isManual), isBackground=\(isBackground), error=\(error?.localizedDescription ?? "nil")")
         cleanupPeripheral(uuid)
         connectionStartTimes.removeValue(forKey: uuid)
+        serviceDiscoveryTimers[uuid]?.invalidate()
+        serviceDiscoveryTimers.removeValue(forKey: uuid)
 
-        if !isManual {
+        if !isManual && !isBackground {
             let reason = Self.bleReasonString(from: error)
             let code = (error as? CBError)?.code.rawValue ?? -1
             persistDisconnectEvent(uuid: uuid, reason: reason, reasonCode: Int(code), isManual: false)
@@ -444,11 +485,10 @@ extension OmiBleManager: CBCentralManagerDelegate {
 
         flutterApi?.onPeripheralDisconnected(peripheralUuid: uuid, error: error?.localizedDescription) { _ in }
 
-        // Auto-reconnect unless manually disconnected
-        if !isManual {
+        // Auto-reconnect only for unexpected disconnections (not manual, not background)
+        if !isManual && !isBackground {
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(200)) { [weak self] in
                 guard let self = self else { return }
-                // iOS handles this at the BLE chipset level — zero CPU/radio cost while waiting
                 self.centralManager.connect(peripheral, options: nil)
             }
         }
@@ -479,13 +519,17 @@ extension OmiBleManager: CBPeripheralDelegate {
         let allDiscovered = services.allSatisfy { $0.characteristics != nil }
 
         if allDiscovered {
+            // サービス発見タイムアウトタイマーをキャンセル
+            serviceDiscoveryTimers[uuid]?.invalidate()
+            serviceDiscoveryTimers.removeValue(forKey: uuid)
+
             let bleServices = services.map { svc in
                 BleService(
                     uuid: self.fullUuidString(svc.uuid),
                     characteristicUuids: svc.characteristics?.map { self.fullUuidString($0.uuid) } ?? []
                 )
             }
-            
+
             flutterApi?.onDeviceReady(peripheralUuid: uuid, services: bleServices) { _ in }
             startRssiKeepAlive(for: peripheral)
         }
