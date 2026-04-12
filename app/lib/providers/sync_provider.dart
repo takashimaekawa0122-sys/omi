@@ -158,6 +158,13 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
   bool _isAisaSyncing = false;
   bool _isAutoUploading = false;
 
+  /// 同期完了後のクールダウン期間（同期→再接続→再同期の無限ループを防止）
+  DateTime? _lastSyncCompletedAt;
+  bool get isInPostSyncCooldown {
+    if (_lastSyncCompletedAt == null) return false;
+    return DateTime.now().difference(_lastSyncCompletedAt!) < const Duration(seconds: 30);
+  }
+
   /// AISA Phase 2: ディスク上の未同期WALをGroq Whisperで文字起こしする
   /// 起動時 & WAL追加時（SDカードダウンロード完了後など）に呼ばれる
   /// 処理中に新チャンクが到着しても、完了後に再チェックして取りこぼしを防ぐ
@@ -265,29 +272,10 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
 
     final deviceId = SharedPreferencesUtil().btDevice.id;
 
-    // BLE通知を一時停止してファイル転送専用に帯域を確保するヘルパー
-    Future<void> pauseBleNotifications() async {
-      if (deviceId.isEmpty) return;
-      try {
-        final connection = await ServiceManager.instance().device.ensureConnection(deviceId);
-        if (connection != null) {
-          final transport = connection.transport;
-          // NativeBleTransportかどうかをruntimeTypeで確認してからdynamicキャスト
-          // 注: `transport is dynamic` は常にtrueのため使わない
-          if (transport.runtimeType.toString().contains('NativeBle')) {
-            await (transport as dynamic).pauseAllNotifications();
-            Logger.debug('[AISA] BLE通知全解除完了');
-          }
-        }
-      } catch (e) {
-        Logger.debug('[AISA] pauseAllNotifications failed (non-critical): $e');
-      }
-      // ペンダントが通知停止を処理する時間を確保
-      await Future.delayed(const Duration(milliseconds: 500));
-    }
-
-    // ネイティブBLE通知を明示的に全解除（帯域をファイル転送専用に確保）
-    await pauseBleNotifications();
+    // 注: 以前はpauseAllNotifications()でBLE通知を全unsubscribeしていたが、
+    // これが接続を不安定にしBLE切断の原因になっていた。
+    // stopStreamDeviceRecording()でDart側のストリーム処理を止めるだけで十分。
+    // ネイティブBLE subscriptionは残るが、Dartで消費されないためCPU負荷はほぼゼロ。
 
     try {
       // AISA: 転送失敗時は最大3回まで自動リトライ（storageOffsetが保持されるため途中再開可能）
@@ -302,8 +290,6 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
           await refreshWals();
           _totalWalsToProcess = missingWals.length;
           _walsProcessedCount = 0;
-          // BLE通知を再度一時停止（前回の失敗でリストアされている可能性があるため）
-          await pauseBleNotifications();
           // 再試行前にSyncing状態にリセット
           _updateSyncState(_syncState.toSyncing());
         }
@@ -319,21 +305,28 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
         Logger.debug('[AISA] 転送失敗 → リトライします (attempt $attempt/$maxRetries)');
       }
     } finally {
-      // SDカード同期中にBLE切断が発生した場合、再接続を試みる
-      // 再接続後に音声ストリーミングを再開する
+      // 同期完了タイムスタンプを記録（再接続時の再同期ループを防止）
+      _lastSyncCompletedAt = DateTime.now();
+
+      // SDカード同期後：音声ストリーミングの再開
+      // 注: ensureConnection(force:true) は呼ばない。
+      // force再接続すると_onDeviceConnected → onDeviceConnected → syncWalsViaBle
+      // の無限ループが発生するため、既存の接続があればそのまま使い、
+      // 切断されていたら通常のauto-reconnect（OmiBleManager側）に任せる。
       if (wasStreaming && _captureProvider != null) {
         try {
-          // デバイスが切断されていたら再接続を待つ
           final deviceId = SharedPreferencesUtil().btDevice.id;
           if (deviceId.isNotEmpty) {
-            await ServiceManager.instance().device.ensureConnection(deviceId, force: true);
-            // 再接続完了を待つ（BLEの安定化に少し時間が必要）
-            await Future.delayed(const Duration(seconds: 2));
+            final connection = await ServiceManager.instance().device.ensureConnection(deviceId);
+            if (connection != null) {
+              Logger.debug('[AISA] SDカード同期後に音声ストリーミングを再開');
+              await _captureProvider!.streamDeviceRecording();
+            } else {
+              Logger.debug('[AISA] 同期後にBLE未接続 → auto-reconnectに委ねる');
+            }
           }
-          Logger.debug('[AISA] SDカード同期後に音声ストリーミングを再開');
-          await _captureProvider!.streamDeviceRecording();
         } catch (e) {
-          Logger.debug('[AISA] 同期後の再接続/ストリーミング再開失敗（自動再接続に委ねる）: $e');
+          Logger.debug('[AISA] 同期後のストリーミング再開失敗（auto-reconnectに委ねる）: $e');
         }
       }
     }
