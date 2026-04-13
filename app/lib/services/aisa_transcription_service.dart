@@ -264,7 +264,6 @@ class AisaTranscriptionService {
       '校正してほしい',
       'テキストが記載されていません',
       'テキストをご提供',
-      '申し訳ございませんが',
     ];
     for (final h in substringHallucinations) {
       if (t.contains(h)) return true;
