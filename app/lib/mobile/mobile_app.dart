@@ -16,22 +16,22 @@ class MobileApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // [A.I.S.A.] オンボーディング（名前・言語設定等）を完全スキップ
+    // 再インストール時に毎回設定するのが面倒なため、直接ホーム画面へ
     return Consumer<AuthenticationProvider>(
       builder: (context, authProvider, child) {
         if (authProvider.isSignedIn()) {
-          if (SharedPreferencesUtil().onboardingCompleted) {
-            if (!SharedPreferencesUtil().permissionsCompleted) {
-              return const _PermissionsGate();
-            }
-            return const HomePageWrapper();
-          } else {
-            return const OnboardingWrapper();
+          // オンボーディング未完了でも強制的に完了扱いにしてホームへ
+          if (!SharedPreferencesUtil().onboardingCompleted) {
+            SharedPreferencesUtil().onboardingCompleted = true;
+            SharedPreferencesUtil().permissionsCompleted = true;
           }
-        } else if (SharedPreferencesUtil().hasOmiDevice == false &&
-            SharedPreferencesUtil().hasPersonaCreated &&
-            SharedPreferencesUtil().verifiedPersonaId != null) {
-          return const PersonaProfilePage();
+          if (!SharedPreferencesUtil().permissionsCompleted) {
+            return const _PermissionsGate();
+          }
+          return const HomePageWrapper();
         } else {
+          // 未ログイン時はデバイス選択画面（認証はここで行われる）
           return const DeviceSelectionPage();
         }
       },
