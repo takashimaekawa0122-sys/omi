@@ -1,14 +1,7 @@
 import 'package:flutter/material.dart';
 
-import 'package:font_awesome_flutter/font_awesome_flutter.dart';
-import 'package:omi/widgets/shimmer_with_timeout.dart';
-
-import 'package:omi/backend/http/api/users.dart';
-import 'package:omi/backend/schema/daily_summary.dart';
-import 'package:omi/pages/settings/daily_summary_detail_page.dart';
-import 'package:omi/utils/analytics/mixpanel.dart';
-import 'package:omi/utils/l10n_extensions.dart';
-import 'package:omi/utils/ui_guidelines.dart';
+import 'package:omi/models/aisa_daily_summary.dart';
+import 'package:omi/services/aisa_summary_service.dart';
 
 class DailySummariesList extends StatefulWidget {
   const DailySummariesList({super.key});
@@ -18,119 +11,177 @@ class DailySummariesList extends StatefulWidget {
 }
 
 class _DailySummariesListState extends State<DailySummariesList> {
-  List<DailySummary> _summaries = [];
+  AisaDailySummary? _summary;
   bool _isLoading = true;
-  bool _isLoadingMore = false;
-  int _offset = 0;
-  static const int _limit = 20;
-  bool _hasMore = true;
+  bool _isGenerating = false;
 
   @override
   void initState() {
     super.initState();
-    _loadSummaries();
+    _loadSummary();
   }
 
-  Future<void> _loadSummaries() async {
+  Future<void> _loadSummary() async {
     setState(() => _isLoading = true);
-    final summaries = await getDailySummaries(limit: _limit, offset: 0);
+    final summary = await AisaSummaryService.instance.loadTodaySummary();
     if (mounted) {
       setState(() {
-        _summaries = summaries;
+        _summary = summary;
         _isLoading = false;
-        _offset = summaries.length;
-        _hasMore = summaries.length >= _limit;
       });
     }
   }
 
-  Future<void> _loadMore() async {
-    if (_isLoadingMore || !_hasMore) return;
-    setState(() => _isLoadingMore = true);
-    final moreSummaries = await getDailySummaries(limit: _limit, offset: _offset);
+  Future<void> _generateNow() async {
+    setState(() => _isGenerating = true);
+    final summary = await AisaSummaryService.instance.generateDailySummary();
     if (mounted) {
       setState(() {
-        _summaries.addAll(moreSummaries);
-        _offset += moreSummaries.length;
-        _hasMore = moreSummaries.length >= _limit;
-        _isLoadingMore = false;
+        if (summary != null) _summary = summary;
+        _isGenerating = false;
       });
     }
-  }
-
-  void _openSummary(DailySummary summary) {
-    // Track recap card click
-    final cardIndex = _summaries.indexOf(summary);
-    MixpanelManager().recapSummaryCardClicked(summaryId: summary.id, date: summary.date, cardIndex: cardIndex);
-
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (context) => DailySummaryDetailPage(summaryId: summary.id, summary: summary),
-      ),
-    );
   }
 
   @override
   Widget build(BuildContext context) {
     if (_isLoading) {
-      return SliverToBoxAdapter(child: _buildLoadingShimmer());
+      return const SliverToBoxAdapter(
+        child: Padding(
+          padding: EdgeInsets.all(32),
+          child: Center(child: CircularProgressIndicator(color: Colors.white54)),
+        ),
+      );
     }
 
-    if (_summaries.isEmpty) {
+    if (_summary == null) {
       return SliverToBoxAdapter(child: _buildEmptyState());
     }
 
-    return SliverList(
-      delegate: SliverChildBuilderDelegate((context, index) {
-        // Extra tail item for spinner / bottom padding
-        if (index == _summaries.length) {
-          if (_isLoadingMore) {
-            return Padding(
-              padding: const EdgeInsets.all(16),
-              child: Center(
-                child: SizedBox(
-                  width: 24,
-                  height: 24,
-                  child: CircularProgressIndicator(strokeWidth: 2, color: Colors.grey.shade400),
+    return SliverToBoxAdapter(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // ヘッダー
+            Row(
+              children: [
+                const Text('📊', style: TextStyle(fontSize: 24)),
+                const SizedBox(width: 8),
+                Text(
+                  '${_summary!.date} のまとめ',
+                  style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w600),
+                ),
+                const Spacer(),
+                // 更新ボタン
+                GestureDetector(
+                  onTap: _isGenerating ? null : _generateNow,
+                  child: _isGenerating
+                      ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white54))
+                      : const Icon(Icons.refresh, color: Colors.white54, size: 20),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+
+            // 結論
+            _buildSection(
+              icon: '💡',
+              title: '結論',
+              child: Text(
+                _summary!.conclusions,
+                style: const TextStyle(color: Colors.white, fontSize: 15, height: 1.5),
+              ),
+            ),
+
+            // 要約
+            _buildSection(
+              icon: '📝',
+              title: '要約',
+              child: Text(
+                _summary!.summary,
+                style: const TextStyle(color: Colors.white, fontSize: 15, height: 1.5),
+              ),
+            ),
+
+            // 課題
+            if (_summary!.issues.isNotEmpty)
+              _buildSection(
+                icon: '✅',
+                title: '課題・TODO',
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: _summary!.issues
+                      .map((issue) => Padding(
+                            padding: const EdgeInsets.only(bottom: 6),
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text('・', style: TextStyle(color: Colors.white70, fontSize: 15)),
+                                const SizedBox(width: 4),
+                                Expanded(
+                                  child: Text(
+                                    issue,
+                                    style: const TextStyle(color: Colors.white, fontSize: 15, height: 1.4),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ))
+                      .toList(),
                 ),
               ),
-            );
-          }
-          return const SizedBox(height: 100);
-        }
 
-        // Prefetch more when approaching end
-        if (_hasMore && !_isLoadingMore && index >= _summaries.length - 3) {
-          WidgetsBinding.instance.addPostFrameCallback((_) => _loadMore());
-        }
+            // 感情分析
+            _buildSection(
+              icon: '💭',
+              title: '感情分析',
+              child: Text(
+                _summary!.sentiment,
+                style: const TextStyle(color: Colors.white, fontSize: 15, height: 1.5),
+              ),
+            ),
 
-        return _buildSummaryCard(_summaries[index]);
-      }, childCount: _summaries.length + 1),
+            // 生成時刻
+            Padding(
+              padding: const EdgeInsets.only(top: 8, bottom: 80),
+              child: Text(
+                _formatGeneratedAt(_summary!.generatedAtMs),
+                style: const TextStyle(color: Colors.white38, fontSize: 12),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
-  Widget _buildLoadingShimmer() {
-    return Padding(
+  Widget _buildSection({required String icon, required String title, required Widget child}) {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 12),
       padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1F1F25),
+        borderRadius: BorderRadius.circular(16),
+      ),
       child: Column(
-        children: List.generate(
-          5,
-          (index) => Padding(
-            padding: const EdgeInsets.only(bottom: 12),
-            child: ShimmerWithTimeout(
-              baseColor: AppStyles.backgroundSecondary,
-              highlightColor: AppStyles.backgroundTertiary,
-              child: Container(
-                height: 80,
-                decoration: BoxDecoration(
-                  color: AppStyles.backgroundSecondary,
-                  borderRadius: BorderRadius.circular(24),
-                ),
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Text(icon, style: const TextStyle(fontSize: 18)),
+              const SizedBox(width: 8),
+              Text(
+                title,
+                style: const TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.w600),
               ),
-            ),
+            ],
           ),
-        ),
+          const SizedBox(height: 10),
+          child,
+        ],
       ),
     );
   }
@@ -146,14 +197,28 @@ class _DailySummariesListState extends State<DailySummariesList> {
             const Text('📊', style: TextStyle(fontSize: 64)),
             const SizedBox(height: 16),
             Text(
-              context.l10n.noDailyRecapsYet,
+              'まだ要約がありません',
               style: TextStyle(color: Colors.grey.shade400, fontSize: 18, fontWeight: FontWeight.w500),
             ),
             const SizedBox(height: 8),
             Text(
-              context.l10n.dailyRecapsDescription,
+              '会話が蓄積されると自動的に要約が生成されます',
               textAlign: TextAlign.center,
               style: TextStyle(color: Colors.grey.shade600, fontSize: 14),
+            ),
+            const SizedBox(height: 24),
+            GestureDetector(
+              onTap: _isGenerating ? null : _generateNow,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF6C63FF),
+                  borderRadius: BorderRadius.circular(24),
+                ),
+                child: _isGenerating
+                    ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                    : const Text('今すぐ生成', style: TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w600)),
+              ),
             ),
           ],
         ),
@@ -161,109 +226,8 @@ class _DailySummariesListState extends State<DailySummariesList> {
     );
   }
 
-  String _formatCondensedDate(String dateStr) {
-    // dateStr is in YYYY-MM-DD format
-    final parts = dateStr.split('-');
-    if (parts.length != 3) return dateStr;
-
-    final year = int.tryParse(parts[0]) ?? 2024;
-    final month = int.tryParse(parts[1]) ?? 1;
-    final day = int.tryParse(parts[2]) ?? 1;
-
-    final date = DateTime(year, month, day);
-    final now = DateTime.now();
-    final today = DateTime(now.year, now.month, now.day);
-    final yesterday = today.subtract(const Duration(days: 1));
-
-    // Check for Today and Yesterday
-    if (date.year == today.year && date.month == today.month && date.day == today.day) {
-      return 'Today';
-    }
-    if (date.year == yesterday.year && date.month == yesterday.month && date.day == yesterday.day) {
-      return 'Yesterday';
-    }
-
-    const weekdays = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-
-    final weekday = weekdays[date.weekday - 1];
-    final monthName = months[month - 1];
-
-    return '$weekday, $monthName $day';
-  }
-
-  Widget _buildSummaryCard(DailySummary summary) {
-    return GestureDetector(
-      onTap: () => _openSummary(summary),
-      child: Padding(
-        padding: const EdgeInsets.only(top: 12, left: 16, right: 16),
-        child: Container(
-          width: double.maxFinite,
-          decoration: BoxDecoration(color: const Color(0xFF1F1F25), borderRadius: BorderRadius.circular(24.0)),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // Emoji container - matches conversation list item
-                Container(
-                  width: 40,
-                  height: 40,
-                  decoration: BoxDecoration(color: const Color(0xFF35343B), borderRadius: BorderRadius.circular(12)),
-                  alignment: Alignment.center,
-                  child: Text(summary.dayEmoji, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w500)),
-                ),
-                const SizedBox(width: 12),
-                // Title and metadata
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        summary.headline,
-                        style: Theme.of(context).textTheme.titleMedium,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      const SizedBox(height: 8),
-                      // Date and stats with icons
-                      Row(
-                        children: [
-                          Text(
-                            _formatCondensedDate(summary.date),
-                            style: const TextStyle(color: Color(0xFF9A9BA1), fontSize: 14),
-                            maxLines: 1,
-                          ),
-                          if (summary.stats.totalConversations > 0) ...[
-                            const Text(' • ', style: TextStyle(color: Color(0xFF9A9BA1), fontSize: 14)),
-                            const FaIcon(FontAwesomeIcons.solidComments, size: 10, color: Color(0xFF9A9BA1)),
-                            const SizedBox(width: 4),
-                            Text(
-                              '${summary.stats.totalConversations}',
-                              style: const TextStyle(color: Color(0xFF9A9BA1), fontSize: 14),
-                              maxLines: 1,
-                            ),
-                          ],
-                          if (summary.stats.actionItemsCount > 0) ...[
-                            const Text(' • ', style: TextStyle(color: Color(0xFF9A9BA1), fontSize: 14)),
-                            const FaIcon(FontAwesomeIcons.listCheck, size: 11, color: Color(0xFF9A9BA1)),
-                            const SizedBox(width: 4),
-                            Text(
-                              '${summary.stats.actionItemsCount}',
-                              style: const TextStyle(color: Color(0xFF9A9BA1), fontSize: 14),
-                              maxLines: 1,
-                            ),
-                          ],
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
+  String _formatGeneratedAt(int ms) {
+    final dt = DateTime.fromMillisecondsSinceEpoch(ms);
+    return '最終更新: ${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
   }
 }

@@ -7,6 +7,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/foundation.dart';
+import 'package:omi/models/aisa_daily_summary.dart';
 import 'package:omi/utils/aisa_debug_logger.dart';
 
 const _aisaFirebaseOptions = FirebaseOptions(
@@ -172,6 +173,35 @@ class AisaFirestoreService {
     AisaDebugLogger.instance.info('Firestore読み込み: ${entries.length}件 (${days}日分)');
     debugPrint('[AISA load] 読み込み完了: ${entries.length}件');
     return entries;
+  }
+  /// 日次要約をFirestoreに保存
+  Future<void> saveSummary(String dateStr, AisaDailySummary summary) async {
+    if (!_initialized || _firestore == null) return;
+    try {
+      await _firestore!.collection('sessions').doc(dateStr).set(
+        {'summary': summary.toJson()},
+        SetOptions(merge: true),
+      );
+      debugPrint('[AISA] 要約保存成功: $dateStr');
+    } catch (e) {
+      debugPrint('[AISA] 要約保存失敗: $e');
+    }
+  }
+
+  /// 日次要約をFirestoreから読み込む
+  Future<AisaDailySummary?> loadSummary(String dateStr) async {
+    if (!_initialized || _firestore == null) return null;
+    try {
+      final doc = await _firestore!.collection('sessions').doc(dateStr).get();
+      if (!doc.exists) return null;
+      final data = doc.data();
+      final summaryData = data?['summary'] as Map<String, dynamic>?;
+      if (summaryData == null) return null;
+      return AisaDailySummary.fromJson(summaryData);
+    } catch (e) {
+      debugPrint('[AISA] 要約読み込み失敗: $e');
+      return null;
+    }
   }
 }
 

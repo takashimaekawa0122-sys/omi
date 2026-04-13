@@ -144,6 +144,19 @@ class _FolderTabsState extends State<FolderTabs> {
     );
     tabs.add(const SizedBox(width: 8));
 
+    // 要約 tab
+    tabs.add(
+      Padding(
+        padding: const EdgeInsets.only(right: 8),
+        child: _FolderTab(
+          label: '要約',
+          isSelected: widget.showDailySummaries,
+          skipFolderTracking: true,
+          onTap: widget.onDailySummariesToggle,
+        ),
+      ),
+    );
+
     // Starred tab
     tabs.add(_buildStarredTab());
 

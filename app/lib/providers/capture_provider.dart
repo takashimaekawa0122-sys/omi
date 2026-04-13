@@ -18,6 +18,7 @@ import 'package:omi/backend/http/api/conversations.dart';
 import 'package:omi/services/aisa_firestore_service.dart';
 import 'package:omi/services/aisa_offline_sync_service.dart';
 import 'package:omi/services/aisa_transcription_service.dart';
+import 'package:omi/services/aisa_summary_service.dart';
 import 'package:omi/utils/aisa_debug_logger.dart';
 import 'package:omi/utils/audio/wav_bytes.dart';
 import 'package:omi/backend/http/api/users.dart';
@@ -83,6 +84,7 @@ class CaptureProvider extends ChangeNotifier
   Timer? _keepAliveTimer;
   DateTime? _keepAliveLastExecutedAt;
   Timer? _aisaTimer;
+  Timer? _aisaSummaryTimer;
 
   IWalService get _wal => ServiceManager.instance().wal;
 
@@ -437,6 +439,10 @@ class CaptureProvider extends ChangeNotifier
     }
     _aisaTimer ??= Timer.periodic(const Duration(seconds: 5), (_) {
       _triggerAisaTranscription();
+    });
+    // 1時間ごとに日次要約を生成
+    _aisaSummaryTimer ??= Timer.periodic(const Duration(minutes: 60), (_) {
+      AisaSummaryService.instance.generateDailySummary();
     });
     AisaDebugLogger.instance.info('タイマー起動: 5秒間隔, session=$_sessionStartSeconds');
     notifyListeners();
@@ -1001,6 +1007,7 @@ class CaptureProvider extends ChangeNotifier
     _socket?.unsubscribe(this);
     _keepAliveTimer?.cancel();
     _aisaTimer?.cancel();
+    _aisaSummaryTimer?.cancel();
     _connectionStateListener?.cancel();
     _aisaOfflineSubscription?.cancel();
     _metricsTimer?.cancel();
