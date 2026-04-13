@@ -221,22 +221,21 @@ class _ConversationsPageState extends State<ConversationsPage> with AutomaticKee
                 },
               ),
 
-              // Section header - show "Daily Recaps" or "Conversations"
+              // Section header
               SliverToBoxAdapter(
                 child: Builder(
                   builder: (context) => Padding(
                     padding: const EdgeInsets.only(left: 24, top: 16, bottom: 8),
                     child: Text(
-                      convoProvider.showDailySummaries ? context.l10n.dailyRecaps : context.l10n.conversations,
+                      context.l10n.conversations,
                       style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w600),
                     ),
                   ),
                 ),
               ),
 
-              // Folder tabs - hide when showing daily recaps
-              if (!convoProvider.showDailySummaries)
-                Consumer2<FolderProvider, ConversationProvider>(
+              // Folder tabs - always visible
+              Consumer2<FolderProvider, ConversationProvider>(
                   builder: (context, folderProvider, convoProvider, _) {
                     return SliverToBoxAdapter(
                       child: FolderTabs(
