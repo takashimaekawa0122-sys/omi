@@ -126,16 +126,19 @@ class AisaFirestoreService {
           '${date.day.toString().padLeft(2, '0')}';
 
       try {
+        // orderByのみ使用（where+orderByの複合インデックスが未設定だとエラーになるため）
+        // deleted==trueのエントリはDart側でフィルタする
         final snapshot = await _firestore!
             .collection('sessions')
             .doc(dateStr)
             .collection('entries')
-            .where('deleted', isEqualTo: false)
             .orderBy('timestampMs', descending: false)
             .get();
 
         for (final doc in snapshot.docs) {
           final data = doc.data();
+          final deleted = data['deleted'] as bool? ?? false;
+          if (deleted) continue;
           final text = data['text'] as String? ?? '';
           final timestampMs = data['timestampMs'] as int? ?? 0;
           if (text.trim().isEmpty) continue;

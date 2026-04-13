@@ -260,7 +260,7 @@ extension FlutterError: Error {}
   }
 
   override func applicationWillTerminate(_ application: UIApplication) {
-    OmiBleManager.shared.disconnectAllPeripherals()
+    OmiBleManager.shared.disconnectForBackground()
 
     // If title and body are nil, then we don't need to show notification.
     if notificationTitleOnKill == nil || notificationBodyOnKill == nil {

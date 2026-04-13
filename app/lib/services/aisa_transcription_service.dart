@@ -6,6 +6,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' show sqrt;
 
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
@@ -124,9 +125,18 @@ class AisaTranscriptionService {
     AisaDebugLogger.instance.info('Groq APIレスポンス: HTTP ${streamedResponse.statusCode} OK');
 
     final json = jsonDecode(body) as Map<String, dynamic>;
-    _lastWavFile = wavFile; // セグメントごとの音量計算用にWAV参照を保持
-    final filtered = _filterSpeechSegments(json);
-    _lastWavFile = null;
+    // WAVファイルのPCMデータをメモリに読み込む（ファイル削除後もセグメント音量計算可能にする）
+    Uint8List? pcmSnapshot;
+    int wavSampleRate = 16000;
+    try {
+      final wavBytes = await wavFile.readAsBytes();
+      if (wavBytes.length > 44) {
+        wavSampleRate = wavBytes[24] | (wavBytes[25] << 8) | (wavBytes[26] << 16) | (wavBytes[27] << 24);
+        if (wavSampleRate <= 0 || wavSampleRate > 96000) wavSampleRate = 16000;
+        pcmSnapshot = Uint8List.fromList(wavBytes.sublist(44));
+      }
+    } catch (_) {}
+    final filtered = _filterSpeechSegments(json, pcmData: pcmSnapshot, sampleRate: wavSampleRate);
     if (filtered == null || filtered.isEmpty) return filtered;
 
     // Whisperハルシネーション除去: 無音・ノイズから生成される定型文をブロック
@@ -156,10 +166,7 @@ class AisaTranscriptionService {
   ///   no_speech_prob >= 0.6  → BGM・環境音・ノイズと判定（元の閾値に戻す: 0.5は厳しすぎた）
   ///   compression_ratio > 2.8 → Whisperハルシネーション（同じテキストを繰り返す異常状態）
   ///   avg_logprob < -1.0     → Whisperが内容を認識できない（ノイズや遠方音）
-  /// WAVファイルの参照を保持（セグメントごとの音量計算に使用）
-  File? _lastWavFile;
-
-  String? _filterSpeechSegments(Map<String, dynamic> json) {
+  String? _filterSpeechSegments(Map<String, dynamic> json, {Uint8List? pcmData, int sampleRate = 16000}) {
     final segments = json['segments'] as List<dynamic>?;
 
     // verbose_jsonのセグメント情報が取れない場合はtextフィールドをそのまま返す
@@ -167,21 +174,6 @@ class AisaTranscriptionService {
       final text = json['text'] as String?;
       debugPrint('[AISA] Groq成功（セグメントなし）: ${text?.length ?? 0}文字');
       return text?.trim().isEmpty == true ? null : text;
-    }
-
-    // WAVファイルからPCMデータを読み込み（セグメントごとの音量計算用）
-    Uint8List? pcmData;
-    int sampleRate = 16000; // デフォルト
-    if (_lastWavFile != null) {
-      try {
-        final bytes = _lastWavFile!.readAsBytesSync();
-        if (bytes.length > 44) {
-          // WAVヘッダーからサンプルレートを取得（バイト24-27, little-endian）
-          sampleRate = bytes[24] | (bytes[25] << 8) | (bytes[26] << 16) | (bytes[27] << 24);
-          if (sampleRate <= 0 || sampleRate > 96000) sampleRate = 16000;
-          pcmData = Uint8List.fromList(bytes.sublist(44));
-        }
-      } catch (_) {}
     }
 
     int total = segments.length;
@@ -270,14 +262,7 @@ class AisaTranscriptionService {
     }
 
     if (count == 0) return -1;
-    // sqrt を使わず近似: sumSquares/count の平方根を Newton法1回で近似
-    final meanSquare = sumSquares / count;
-    // 初期値を meanSquare / 256 として1回反復
-    var est = meanSquare / 256;
-    if (est > 0) {
-      est = (est + meanSquare / est) / 2;
-    }
-    return est;
+    return sqrt(sumSquares / count);
   }
 
   /// Whisperが無音・ノイズから生成する定型ハルシネーションを検出する
@@ -451,12 +436,11 @@ class AisaTranscriptionService {
         count++;
       }
 
-      // 閾値を二乗で比較（dart:mathのsqrtを使わない）
-      // RMS 50 → 50^2 = 2500
-      final isSilent = (count == 0) || (sumSquares / count < 2500);
+      final rmsValue = count > 0 ? sqrt(sumSquares / count) : 0.0;
+      final isSilent = rmsValue < 50;
 
       if (isSilent) {
-        debugPrint('[AISA VAD] 無音判定: RMS²=${count > 0 ? (sumSquares / count).toStringAsFixed(0) : "0"} (閾値: 2500)');
+        debugPrint('[AISA VAD] 無音判定: RMS=${rmsValue.toStringAsFixed(0)} (閾値: 50)');
       }
       return isSilent;
     } catch (e) {

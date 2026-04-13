@@ -463,6 +463,8 @@ extension OmiBleManager: CBCentralManagerDelegate {
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
         let uuid = peripheralUuidString(peripheral)
         NSLog("[OmiBle] didFailToConnect: \(peripheral.name ?? "<nil>"), uuid=\(uuid), error=\(error?.localizedDescription ?? "nil")")
+        serviceDiscoveryTimers[uuid]?.invalidate()
+        serviceDiscoveryTimers.removeValue(forKey: uuid)
         cleanupPeripheral(uuid)
         flutterApi?.onPeripheralDisconnected(peripheralUuid: uuid, error: error?.localizedDescription) { _ in }
     }

@@ -269,9 +269,11 @@ class WalSyncs implements IWalSync {
       final diskMissWals = allMissing
           .where((w) => w.storage == WalStorage.disk && w.status == WalStatus.miss)
           .toList();
-      if (diskMissWals.isNotEmpty) {
+      if (diskMissWals.isNotEmpty && !AisaOfflineSyncService.instance.isSyncing) {
         Logger.debug("WalSyncs: AISA - ${diskMissWals.length}件のWALを文字起こし");
         await AisaOfflineSyncService.instance.syncPendingWals(diskMissWals, _phoneSync);
+      } else if (AisaOfflineSyncService.instance.isSyncing) {
+        Logger.debug("WalSyncs: AISA - 既に文字起こし実行中のためスキップ");
       }
     } catch (e) {
       Logger.debug("WalSyncs: AISA phase error (continuing to Phase 2): $e");

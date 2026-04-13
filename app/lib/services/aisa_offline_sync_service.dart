@@ -28,6 +28,10 @@ class AisaOfflineSyncService {
   Stream<String> get transcriptStream => _transcriptController.stream;
 
   bool _isCancelled = false;
+  bool _isSyncing = false;
+
+  /// 外部から同期中かどうかを確認するためのプロパティ（二重実行防止用）
+  bool get isSyncing => _isSyncing;
 
   /// 進行中の同期を中断する（手動同期開始時にSyncProviderから呼ばれる）
   void cancelSync() {
@@ -41,13 +45,16 @@ class AisaOfflineSyncService {
     List<Wal> pendingWals,
     LocalWalSyncImpl phoneSync,
   ) async {
-    _isCancelled = false; // 新規実行開始時にリセット
+    if (_isSyncing) return; // 二重実行防止
+    _isCancelled = false;
+    _isSyncing = true;
 
     // APIキー未設定の早期検出
     const groqApiKey = String.fromEnvironment('GROQ_API_KEY');
     if (groqApiKey.isEmpty) {
       debugPrint('[AISA Offline] GROQ_API_KEY未設定のためオフライン同期をスキップ');
       AisaDebugLogger.instance.error('❌ [Offline] GROQ_API_KEY未設定 - オフライン同期不可');
+      _isSyncing = false;
       return;
     }
 
@@ -55,7 +62,10 @@ class AisaOfflineSyncService {
         .where((w) => w.storage == WalStorage.disk && w.filePath != null)
         .toList();
 
-    if (diskWals.isEmpty) return;
+    if (diskWals.isEmpty) {
+      _isSyncing = false;
+      return;
+    }
 
     debugPrint('[AISA Offline] ${diskWals.length}件のオフライン録音を処理開始');
     AisaDebugLogger.instance.info('[Offline] ${diskWals.length}件のオフライン録音を処理開始');
@@ -159,6 +169,7 @@ class AisaOfflineSyncService {
         '(成功: $successCount, スキップ: $skipCount, 失敗: $failCount)');
     AisaDebugLogger.instance.info(
         '[Offline] 完了: $savedSessions件保存 (成功=$successCount スキップ=$skipCount 失敗=$failCount)');
+    _isSyncing = false;
   }
 
   /// WAL 1件を文字起こしのみ（Firestoreには保存しない）
