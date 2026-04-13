@@ -4,6 +4,7 @@ import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/models/sync_state.dart';
+import 'package:omi/services/aisa_offline_sync_service.dart';
 import 'package:omi/services/connectivity_service.dart';
 import 'package:omi/services/wals/flash_page_wal_sync.dart';
 import 'package:omi/services/wals/local_wal_sync.dart';
@@ -256,6 +257,28 @@ class WalSyncs implements IWalSync {
     if (_isCancelled) {
       Logger.debug("WalSyncs: Cancelled after waiting for internet");
       DebugLogManager.logWarning('Sync cancelled while waiting for internet');
+      return resp;
+    }
+
+    // AISA Phase: SDカード/FlashPageからダウンロード済みのWALをGroq Whisperで文字起こし
+    // Phase 2（Omiクラウド送信）の前に実行しないと、syncedになった後では対象WALが見つからない
+    Logger.debug("WalSyncs: AISA Phase - Transcribing downloaded WALs before cloud upload");
+    DebugLogManager.logInfo('AISA Phase: Transcribing downloaded WALs');
+    try {
+      final allMissing = await _phoneSync.getMissingWals();
+      final diskMissWals = allMissing
+          .where((w) => w.storage == WalStorage.disk && w.status == WalStatus.miss)
+          .toList();
+      if (diskMissWals.isNotEmpty) {
+        Logger.debug("WalSyncs: AISA - ${diskMissWals.length}件のWALを文字起こし");
+        await AisaOfflineSyncService.instance.syncPendingWals(diskMissWals, _phoneSync);
+      }
+    } catch (e) {
+      Logger.debug("WalSyncs: AISA phase error (continuing to Phase 2): $e");
+    }
+
+    if (_isCancelled) {
+      Logger.debug("WalSyncs: Cancelled after AISA phase");
       return resp;
     }
 
