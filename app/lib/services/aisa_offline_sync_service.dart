@@ -201,13 +201,13 @@ class AisaOfflineSyncService {
       filename: 'aisa_offline_${wal.id}.wav',
     );
 
-    // VADチェック：完全な無音のみスキップ（閾値を低く設定）
-    // SDカード録音はユーザーが意図的に録音したものなので非常に寛容な閾値にする
-    // 閾値50: ほぼ無音（ホワイトノイズのみ）のチャンクだけスキップ
+    // VADチェック：環境音をスキップして同期時間を短縮
+    // 閾値200: エアコン・冷蔵庫・遠くのTV等の環境音をスキップし、
+    //          明確な人の声（通常RMS 300〜数千）のみ処理する
     final wavBytes = await wavFile.readAsBytes();
     final rms = _calcRms(wavBytes);
-    if (rms <= 50) {
-      debugPrint('[AISA] チャンク ${wal.id}: VADスキップ (RMS=$rms ≤ 50)');
+    if (rms <= 200) {
+      debugPrint('[AISA] チャンク ${wal.id}: VADスキップ (RMS=$rms ≤ 200)');
       await wavFile.delete();
       return null;
     }
