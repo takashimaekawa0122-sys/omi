@@ -1528,13 +1528,14 @@ class CaptureProvider extends ChangeNotifier
       AisaDebugLogger.instance.info('Firestore復元: ${entries.length}件');
 
       for (final entry in entries) {
+        final parsed = _parseAisaTitleAndEmoji(entry.text, entry.timestamp);
         final conversation = ServerConversation(
           id: 'aisa_fs_${entry.id}',
           createdAt: entry.timestamp,
           structured: Structured(
-            '${entry.timestamp.hour.toString().padLeft(2, '0')}:${entry.timestamp.minute.toString().padLeft(2, '0')} の会話',
-            entry.text,
-            emoji: '🎙️',
+            parsed.title,
+            parsed.body,
+            emoji: parsed.emoji,
           ),
           transcriptSegments: [],
           source: ConversationSource.phone,
@@ -1557,20 +1558,23 @@ class CaptureProvider extends ChangeNotifier
     }
     final now = DateTime.now();
     _aisaConversationCounter++;
+
+    final parsed = _parseAisaTitleAndEmoji(transcript, now);
+
     final conversation = ServerConversation(
       id: 'aisa_${now.millisecondsSinceEpoch}_$_aisaConversationCounter',
       createdAt: now,
       structured: Structured(
-        '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')} の会話',
-        transcript,
-        emoji: '🎙️',
+        parsed.title,
+        parsed.body,
+        emoji: parsed.emoji,
       ),
       transcriptSegments: [],
       source: ConversationSource.phone,
       status: ConversationStatus.completed,
     );
     conversationProvider!.upsertConversation(conversation);
-    Logger.debug('[AISA] 会話を追加: $transcript');
+    Logger.debug('[AISA] 会話を追加: $title $emoji');
   }
 
   Future<void> _autoSyncSessionWals(int sessionStartSeconds, String conversationId) async {
@@ -1880,4 +1884,28 @@ class CaptureProvider extends ChangeNotifier
     updateRecordingState(RecordingState.deviceRecord);
     notifyListeners();
   }
+}
+
+/// Claude出力の1行目からタイトルと絵文字をパースするヘルパー
+class _AisaParsed {
+  final String title;
+  final String emoji;
+  final String body;
+  const _AisaParsed({required this.title, required this.emoji, required this.body});
+}
+
+_AisaParsed _parseAisaTitleAndEmoji(String text, DateTime timestamp) {
+  final fallbackTitle = '${timestamp.hour.toString().padLeft(2, '0')}:${timestamp.minute.toString().padLeft(2, '0')} の会話';
+  final lines = text.split('\n');
+  if (lines.isNotEmpty && lines[0].contains('\t')) {
+    final parts = lines[0].split('\t');
+    if (parts.length >= 2 && parts[0].trim().isNotEmpty) {
+      return _AisaParsed(
+        title: parts[0].trim(),
+        emoji: parts[1].trim(),
+        body: lines.skip(1).join('\n').trim(),
+      );
+    }
+  }
+  return _AisaParsed(title: fallbackTitle, emoji: '🎙️', body: text);
 }

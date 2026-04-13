@@ -424,13 +424,14 @@ class ConversationProvider extends ChangeNotifier {
       for (final entry in entries) {
         final id = 'aisa_fs_${entry.id}';
         if (existingIds.contains(id)) continue;
+        final parsed = _parseAisaTitleAndEmoji(entry.text, entry.timestamp);
         conversations.add(ServerConversation(
           id: id,
           createdAt: entry.timestamp,
           structured: Structured(
-            '${entry.timestamp.hour.toString().padLeft(2, '0')}:${entry.timestamp.minute.toString().padLeft(2, '0')} の会話',
-            entry.text,
-            emoji: '🎙️',
+            parsed.title,
+            parsed.body,
+            emoji: parsed.emoji,
           ),
           transcriptSegments: [],
           source: ConversationSource.phone,
@@ -1169,4 +1170,28 @@ class ConversationProvider extends ChangeNotifier {
     _groupConversationsByDateWithoutNotify();
     notifyListeners();
   }
+}
+
+/// Claude出力の1行目からタイトルと絵文字をパースするヘルパー
+class _AisaParsed {
+  final String title;
+  final String emoji;
+  final String body;
+  const _AisaParsed({required this.title, required this.emoji, required this.body});
+}
+
+_AisaParsed _parseAisaTitleAndEmoji(String text, DateTime timestamp) {
+  final fallbackTitle = '${timestamp.hour.toString().padLeft(2, '0')}:${timestamp.minute.toString().padLeft(2, '0')} の会話';
+  final lines = text.split('\n');
+  if (lines.isNotEmpty && lines[0].contains('\t')) {
+    final parts = lines[0].split('\t');
+    if (parts.length >= 2 && parts[0].trim().isNotEmpty) {
+      return _AisaParsed(
+        title: parts[0].trim(),
+        emoji: parts[1].trim(),
+        body: lines.skip(1).join('\n').trim(),
+      );
+    }
+  }
+  return _AisaParsed(title: fallbackTitle, emoji: '🎙️', body: text);
 }
