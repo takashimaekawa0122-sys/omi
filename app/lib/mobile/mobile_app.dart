@@ -25,6 +25,11 @@ class MobileApp extends StatelessWidget {
           if (!SharedPreferencesUtil().onboardingCompleted) {
             SharedPreferencesUtil().onboardingCompleted = true;
             SharedPreferencesUtil().permissionsCompleted = true;
+            // 言語ダイアログが毎回出るのを防ぐためデフォルト言語を日本語に設定
+            if (!SharedPreferencesUtil().hasSetPrimaryLanguage) {
+              SharedPreferencesUtil().userPrimaryLanguage = 'ja';
+              SharedPreferencesUtil().hasSetPrimaryLanguage = true;
+            }
           }
           if (!SharedPreferencesUtil().permissionsCompleted) {
             return const _PermissionsGate();
