@@ -36,7 +36,6 @@ class ConversationsPage extends StatefulWidget {
 
 class _ConversationsPageState extends State<ConversationsPage> with AutomaticKeepAliveClientMixin {
   TextEditingController textController = TextEditingController();
-  final AppReviewService _appReviewService = AppReviewService();
   final ScrollController _scrollController = ScrollController();
   final GlobalKey<GoalsWidgetState> _goalsWidgetKey = GlobalKey<GoalsWidgetState>();
 
@@ -73,10 +72,6 @@ class _ConversationsPageState extends State<ConversationsPage> with AutomaticKee
         await folderProvider.loadFolders();
       }
 
-      // Check if we should show the app review prompt for first conversation
-      if (mounted && conversationProvider.conversations.isNotEmpty) {
-        await _appReviewService.showReviewPromptIfNeeded(context, isProcessingFirstConversation: true);
-      }
     });
   }
 
