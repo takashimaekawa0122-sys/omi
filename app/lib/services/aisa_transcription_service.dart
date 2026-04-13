@@ -124,7 +124,9 @@ class AisaTranscriptionService {
     AisaDebugLogger.instance.info('Groq APIレスポンス: HTTP ${streamedResponse.statusCode} OK');
 
     final json = jsonDecode(body) as Map<String, dynamic>;
+    _lastWavFile = wavFile; // セグメントごとの音量計算用にWAV参照を保持
     final filtered = _filterSpeechSegments(json);
+    _lastWavFile = null;
     if (filtered == null || filtered.isEmpty) return filtered;
 
     // Whisperハルシネーション除去: 無音・ノイズから生成される定型文をブロック
@@ -154,6 +156,9 @@ class AisaTranscriptionService {
   ///   no_speech_prob >= 0.6  → BGM・環境音・ノイズと判定（元の閾値に戻す: 0.5は厳しすぎた）
   ///   compression_ratio > 2.8 → Whisperハルシネーション（同じテキストを繰り返す異常状態）
   ///   avg_logprob < -1.0     → Whisperが内容を認識できない（ノイズや遠方音）
+  /// WAVファイルの参照を保持（セグメントごとの音量計算に使用）
+  File? _lastWavFile;
+
   String? _filterSpeechSegments(Map<String, dynamic> json) {
     final segments = json['segments'] as List<dynamic>?;
 
@@ -164,37 +169,63 @@ class AisaTranscriptionService {
       return text?.trim().isEmpty == true ? null : text;
     }
 
+    // WAVファイルからPCMデータを読み込み（セグメントごとの音量計算用）
+    Uint8List? pcmData;
+    int sampleRate = 16000; // デフォルト
+    if (_lastWavFile != null) {
+      try {
+        final bytes = _lastWavFile!.readAsBytesSync();
+        if (bytes.length > 44) {
+          // WAVヘッダーからサンプルレートを取得（バイト24-27, little-endian）
+          sampleRate = bytes[24] | (bytes[25] << 8) | (bytes[26] << 16) | (bytes[27] << 24);
+          if (sampleRate <= 0 || sampleRate > 96000) sampleRate = 16000;
+          pcmData = Uint8List.fromList(bytes.sublist(44));
+        }
+      } catch (_) {}
+    }
+
     int total = segments.length;
     int kept = 0;
     int skippedNoSpeech = 0;
     int skippedLowConf = 0;
+    int skippedQuiet = 0;
 
     final buffer = StringBuffer();
     for (final seg in segments) {
       final noSpeechProb = (seg['no_speech_prob'] as num?)?.toDouble() ?? 0.0;
       final avgLogprob = (seg['avg_logprob'] as num?)?.toDouble() ?? 0.0;
       final text = (seg['text'] as String?)?.trim() ?? '';
-
       final compressionRatio = (seg['compression_ratio'] as num?)?.toDouble() ?? 1.0;
 
       if (noSpeechProb >= 0.6) {
-        // BGM・環境音・ノイズと判定 → 除外
         debugPrint('[AISA VAD] 除外(no_speech=$noSpeechProb): "$text"');
         skippedNoSpeech++;
         continue;
       }
       if (compressionRatio > 2.8) {
-        // Whisperハルシネーション: 同じテキストを繰り返し生成する異常状態
-        // 閾値2.8: 通常の会話（〜1.8）や多少の繰り返し（〜2.4）は通過させる
         debugPrint('[AISA VAD] 除外(compression=$compressionRatio): "$text"');
         skippedNoSpeech++;
         continue;
       }
       if (avgLogprob < -1.0) {
-        // Whisperが内容を認識できない（遠方・不明瞭） → 除外
         debugPrint('[AISA VAD] 除外(logprob=$avgLogprob): "$text"');
         skippedLowConf++;
         continue;
+      }
+
+      // 音量フィルタ: セグメントの時間範囲のRMSを計算し、小さい声（＝他人・遠方）を除外
+      // ペンダントマイクは装着者の声が大きく、他人やTVの声は小さい
+      if (pcmData != null) {
+        final segStart = (seg['start'] as num?)?.toDouble() ?? 0.0;
+        final segEnd = (seg['end'] as num?)?.toDouble() ?? 0.0;
+        final rms = _calculateSegmentRms(pcmData, sampleRate, segStart, segEnd);
+        // RMS < 800: 遠方の声と判定（装着者の通常の声は 2000〜10000）
+        // 閾値800は小声でも拾えるが、TV・他人の声（通常300〜700）を除外する
+        if (rms >= 0 && rms < 800) {
+          debugPrint('[AISA VAD] 除外(quiet rms=$rms): "$text"');
+          skippedQuiet++;
+          continue;
+        }
       }
 
       buffer.write(text);
@@ -204,14 +235,49 @@ class AisaTranscriptionService {
     final result = buffer.toString().trim();
     AisaDebugLogger.instance.info(
       'セグメントフィルタ: $total件中 $kept件採用'
-      ' (ノイズ除外=$skippedNoSpeech 低信頼度=$skippedLowConf)'
+      ' (ノイズ=$skippedNoSpeech 低信頼度=$skippedLowConf 小音量=$skippedQuiet)'
       ' → ${result.length}文字${result.isEmpty ? " [空のため破棄]" : ""}',
     );
     debugPrint('[AISA] Groq成功: $total セグメント中 $kept件を採用 '
-        '(ノイズ除外: $skippedNoSpeech件, 低確信度除外: $skippedLowConf件) '
+        '(ノイズ除外: $skippedNoSpeech件, 低確信度: $skippedLowConf件, 小音量: $skippedQuiet件) '
         '→ ${result.length}文字');
 
     return result.isEmpty ? null : result;
+  }
+
+  /// PCMデータの指定時間範囲のRMS（音量）を計算する
+  /// 戻り値: RMS値（0〜32768）。計算不能の場合は-1
+  static double _calculateSegmentRms(Uint8List pcmData, int sampleRate, double startSec, double endSec) {
+    final startSample = (startSec * sampleRate).toInt();
+    final endSample = (endSec * sampleRate).toInt();
+    final startByte = startSample * 2; // 16bit = 2バイト
+    final endByte = endSample * 2;
+
+    if (startByte >= pcmData.length || startByte >= endByte) return -1;
+    final actualEnd = endByte > pcmData.length ? pcmData.length : endByte;
+
+    double sumSquares = 0;
+    int count = 0;
+    // パフォーマンスのため最大2000サンプルをチェック
+    final totalSamples = (actualEnd - startByte) ~/ 2;
+    final step = totalSamples > 2000 ? totalSamples ~/ 2000 : 1;
+
+    for (int i = startByte; i < actualEnd - 1; i += step * 2) {
+      int sample = pcmData[i] | (pcmData[i + 1] << 8);
+      if (sample >= 32768) sample -= 65536;
+      sumSquares += sample * sample;
+      count++;
+    }
+
+    if (count == 0) return -1;
+    // sqrt を使わず近似: sumSquares/count の平方根を Newton法1回で近似
+    final meanSquare = sumSquares / count;
+    // 初期値を meanSquare / 256 として1回反復
+    var est = meanSquare / 256;
+    if (est > 0) {
+      est = (est + meanSquare / est) / 2;
+    }
+    return est;
   }
 
   /// Whisperが無音・ノイズから生成する定型ハルシネーションを検出する
