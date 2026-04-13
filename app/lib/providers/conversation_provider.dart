@@ -371,7 +371,7 @@ class ConversationProvider extends ChangeNotifier {
       }
     }
     // Firestoreから直接読み込み（退避に含まれない初回起動時のデータも確実に復元）
-    await _mergeAisaConversations();
+    await mergeAisaConversations();
 
     if (conversations.any((c) => c.id.startsWith('aisa_'))) {
       conversations.sort((a, b) => (b.startedAt ?? b.createdAt).compareTo(a.startedAt ?? a.createdAt));
@@ -386,12 +386,16 @@ class ConversationProvider extends ChangeNotifier {
   }
 
   /// [A.I.S.A.] FirestoreからAISA会話を読み込んでconversationsリストにマージし、
-  /// 新しい順にソートしてUIを更新する
-  Future<void> _mergeAisaConversations() async {
+  /// 新しい順にソートしてUIを更新する。
+  /// publicメソッド: home/page.dart, conversations_page.dart から直接呼ばれる
+  Future<void> mergeAisaConversations() async {
     try {
+      // Firestore初期化を待つ（まだ未初期化の場合は初期化を試みる）
+      await AisaFirestoreService.instance.initialize();
+
       final entries = await AisaFirestoreService.instance.loadRecentEntries(days: 7);
+      debugPrint('[AISA merge] Firestore読み込み結果: ${entries.length}件');
       if (entries.isEmpty) {
-        Logger.debug('[AISA] Firestore: 過去7日の会話なし');
         return;
       }
 
@@ -415,7 +419,7 @@ class ConversationProvider extends ChangeNotifier {
         added++;
       }
 
-      if (added == 0) return; // 新規追加なしならUIを更新しない
+      if (added == 0) return;
 
       // 新しい順にソート
       conversations.sort((a, b) => (b.startedAt ?? b.createdAt).compareTo(a.startedAt ?? a.createdAt));
@@ -424,10 +428,10 @@ class ConversationProvider extends ChangeNotifier {
       _groupConversationsByDateWithoutNotify();
       searchedConversations = conversations;
 
-      Logger.debug('[AISA] Firestoreから$added件を追加（合計${conversations.length}件）');
+      debugPrint('[AISA merge] $added件追加（合計${conversations.length}件）');
       notifyListeners();
     } catch (e) {
-      Logger.debug('[AISA] Firestore復元エラー: $e');
+      debugPrint('[AISA merge] ❌ Firestore復元エラー: $e');
     }
   }
 
@@ -437,11 +441,15 @@ class ConversationProvider extends ChangeNotifier {
     // [A.I.S.A.] サーバー取得完了後にFirestoreを読み込む
     // fetchConversations内でも読み込むが、Firestore初期化タイミングの問題で
     // 失敗するケースがあるため、ここで確実にもう一度読み込む
-    await _mergeAisaConversations();
+    await mergeAisaConversations();
   }
 
   List<ServerConversation> _filterOutConvos(List<ServerConversation> convos) {
     return convos.where((convo) {
+      // [A.I.S.A.] AISA会話はフィルタを一切適用しない（常に表示する）
+      // duration=0, transcriptSegments=[], startedAt=null のため各種フィルタに引っかかる
+      if (convo.id.startsWith('aisa_')) return true;
+
       // Filter by discarded status
       // When showDiscardedConversations is true, show all conversations (including discarded)
       // When showDiscardedConversations is false, hide discarded conversations

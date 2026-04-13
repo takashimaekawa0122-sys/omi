@@ -61,6 +61,8 @@ class _ConversationsPageState extends State<ConversationsPage> with AutomaticKee
       } else {
         // Still check for daily summaries even if conversations are cached
         conversationProvider.checkHasDailySummaries();
+        // [A.I.S.A.] キャッシュから復元された場合でもFirestoreのAISA会話をマージ
+        await conversationProvider.mergeAisaConversations();
       }
 
       if (!mounted) return;

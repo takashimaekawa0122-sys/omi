@@ -644,6 +644,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
                   } else {
                     // Force refresh when internet connection is restored
                     await convoProvider.forceRefreshConversations();
+                    // [A.I.S.A.] キャッシュから復元された場合でもFirestoreのAISA会話をマージ
+                    await convoProvider.mergeAisaConversations();
                   }
 
                   if (messageProvider.messages.isEmpty) {

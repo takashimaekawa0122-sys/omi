@@ -26,15 +26,24 @@ class AisaFirestoreService {
   Future<void> initialize() async {
     if (_initialized) return;
     try {
-      final app = await Firebase.initializeApp(
-        name: 'aisa',
-        options: _aisaFirebaseOptions,
-      );
+      // Firebase.initializeAppは2回呼ぶと例外を投げるため、既存のappを先に確認
+      FirebaseApp app;
+      try {
+        app = Firebase.app('aisa');
+      } catch (_) {
+        app = await Firebase.initializeApp(
+          name: 'aisa',
+          options: _aisaFirebaseOptions,
+        );
+      }
       _firestore = FirebaseFirestore.instanceFor(app: app);
 
       final auth = FirebaseAuth.instanceFor(app: app);
       if (auth.currentUser == null) {
         await auth.signInAnonymously();
+        debugPrint('[AISA] Firestore匿名認証完了: uid=${auth.currentUser?.uid}');
+      } else {
+        debugPrint('[AISA] Firestore既存認証: uid=${auth.currentUser?.uid}');
       }
 
       _initialized = true;
