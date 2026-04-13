@@ -7,6 +7,7 @@ import 'package:omi/backend/http/api/users.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/structured.dart';
+import 'package:omi/services/aisa_firestore_service.dart';
 import 'package:omi/services/app_review_service.dart';
 import 'package:omi/services/notifications/merge_notification_handler.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
@@ -361,15 +362,18 @@ class ConversationProvider extends ChangeNotifier {
       SharedPreferencesUtil().cachedConversations = conversations;
     }
 
-    // [A.I.S.A.] 退避したAISA会話を復元し、重複がないよう追加
-    if (aisaConversations.isNotEmpty) {
-      final existingIds = conversations.map((c) => c.id).toSet();
-      for (final aisa in aisaConversations) {
-        if (!existingIds.contains(aisa.id)) {
-          conversations.add(aisa);
-        }
+    // [A.I.S.A.] メモリ退避 + Firestoreからの直接読み込みの両方で復元
+    // 退避分を先に復元（Firestore読み込み完了前でも表示される）
+    final existingIds = conversations.map((c) => c.id).toSet();
+    for (final aisa in aisaConversations) {
+      if (!existingIds.contains(aisa.id)) {
+        conversations.add(aisa);
       }
-      // 時系列で再ソート（新しい順）
+    }
+    // Firestoreから直接読み込み（退避に含まれない初回起動時のデータも確実に復元）
+    await _loadAisaFromFirestore();
+
+    if (conversations.any((c) => c.id.startsWith('aisa_'))) {
       conversations.sort((a, b) => (b.startedAt ?? b.createdAt).compareTo(a.startedAt ?? a.createdAt));
     }
 
@@ -379,6 +383,35 @@ class ConversationProvider extends ChangeNotifier {
     _groupConversationsByDateWithoutNotify();
 
     notifyListeners();
+  }
+
+  /// [A.I.S.A.] FirestoreからAISA会話を読み込んでconversationsリストにマージする
+  Future<void> _loadAisaFromFirestore() async {
+    try {
+      final entries = await AisaFirestoreService.instance.loadRecentEntries(days: 7);
+      if (entries.isEmpty) return;
+
+      final existingIds = conversations.map((c) => c.id).toSet();
+      for (final entry in entries) {
+        final id = 'aisa_fs_${entry.id}';
+        if (existingIds.contains(id)) continue;
+        conversations.add(ServerConversation(
+          id: id,
+          createdAt: entry.timestamp,
+          structured: Structured(
+            '${entry.timestamp.hour.toString().padLeft(2, '0')}:${entry.timestamp.minute.toString().padLeft(2, '0')} の会話',
+            entry.text,
+            emoji: '🎙️',
+          ),
+          transcriptSegments: [],
+          source: ConversationSource.phone,
+          status: ConversationStatus.completed,
+        ));
+      }
+      Logger.debug('[AISA] fetchConversations後にFirestoreから${entries.length}件復元');
+    } catch (e) {
+      Logger.debug('[AISA] Firestore復元エラー: $e');
+    }
   }
 
   Future getInitialConversations() async {
