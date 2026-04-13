@@ -106,4 +106,62 @@ class AisaFirestoreService {
     AisaDebugLogger.instance.info('Firestore保存: $dateStr (${transcript.length}文字)');
     debugPrint('[AISA] Groq文字起こし保存成功: $dateStr');
   }
+
+  /// Firestoreから今日の会話を読み込む（起動時に呼び出し）
+  /// 直近7日分を取得して会話リストに復元する
+  Future<List<AisaEntry>> loadRecentEntries({int days = 7}) async {
+    if (!_initialized || _firestore == null) {
+      AisaDebugLogger.instance.warning('⚠ Firestore未初期化 - 読み込みスキップ');
+      return [];
+    }
+
+    final entries = <AisaEntry>[];
+    final now = DateTime.now();
+
+    for (int d = 0; d < days; d++) {
+      final date = now.subtract(Duration(days: d));
+      final dateStr =
+          '${date.year.toString().padLeft(4, '0')}-'
+          '${date.month.toString().padLeft(2, '0')}-'
+          '${date.day.toString().padLeft(2, '0')}';
+
+      try {
+        final snapshot = await _firestore!
+            .collection('sessions')
+            .doc(dateStr)
+            .collection('entries')
+            .where('deleted', isEqualTo: false)
+            .orderBy('timestampMs', descending: false)
+            .get();
+
+        for (final doc in snapshot.docs) {
+          final data = doc.data();
+          final text = data['text'] as String? ?? '';
+          final timestampMs = data['timestampMs'] as int? ?? 0;
+          if (text.trim().isEmpty) continue;
+
+          entries.add(AisaEntry(
+            id: doc.id,
+            text: text,
+            timestamp: DateTime.fromMillisecondsSinceEpoch(timestampMs),
+          ));
+        }
+      } catch (e) {
+        debugPrint('[AISA] Firestore読み込みエラー ($dateStr): $e');
+      }
+    }
+
+    AisaDebugLogger.instance.info('Firestore読み込み: ${entries.length}件 (${days}日分)');
+    debugPrint('[AISA] Firestore読み込み完了: ${entries.length}件');
+    return entries;
+  }
+}
+
+/// Firestoreから読み込んだ会話エントリ
+class AisaEntry {
+  final String id;
+  final String text;
+  final DateTime timestamp;
+
+  AisaEntry({required this.id, required this.text, required this.timestamp});
 }

@@ -127,6 +127,7 @@ class CaptureProvider extends ChangeNotifier
   // AISA: オフライン同期トランスクリプトのバッファ
   // conversationProvider が未初期化の場合はここに蓄積し、初期化後にまとめて追加する
   final List<String> _pendingOfflineTranscripts = [];
+  bool _firestoreLoaded = false;
 
   bool _isLoadingInProgressConversation = false;
 
@@ -204,6 +205,12 @@ class CaptureProvider extends ChangeNotifier
         _addAisaConversation(transcript);
       }
       _pendingOfflineTranscripts.clear();
+    }
+
+    // AISA: 初回のみFirestoreから過去の会話を読み込んで会話リストに復元
+    if (cp != null && !_firestoreLoaded) {
+      _firestoreLoaded = true;
+      _loadConversationsFromFirestore();
     }
 
     notifyListeners();
@@ -1418,6 +1425,40 @@ class CaptureProvider extends ChangeNotifier
 
   // AISA: 会話ID生成用カウンター（同一ミリ秒での重複IDを防ぐ）
   int _aisaConversationCounter = 0;
+
+  /// Firestoreから過去の会話を読み込んで会話リストに復元する（起動時に1回だけ呼ばれる）
+  Future<void> _loadConversationsFromFirestore() async {
+    try {
+      final entries = await AisaFirestoreService.instance.loadRecentEntries(days: 7);
+      if (entries.isEmpty) {
+        Logger.debug('[AISA] Firestore: 過去7日の会話なし');
+        return;
+      }
+
+      Logger.debug('[AISA] Firestore: ${entries.length}件の会話を復元');
+      AisaDebugLogger.instance.info('Firestore復元: ${entries.length}件');
+
+      for (final entry in entries) {
+        final conversation = ServerConversation(
+          id: 'aisa_fs_${entry.id}',
+          createdAt: entry.timestamp,
+          structured: Structured(
+            '${entry.timestamp.hour.toString().padLeft(2, '0')}:${entry.timestamp.minute.toString().padLeft(2, '0')} の会話',
+            entry.text,
+            emoji: '🎙️',
+          ),
+          transcriptSegments: [],
+          source: ConversationSource.phone,
+          status: ConversationStatus.completed,
+        );
+        conversationProvider?.upsertConversation(conversation);
+      }
+      notifyListeners();
+    } catch (e) {
+      Logger.debug('[AISA] Firestore読み込みエラー: $e');
+      AisaDebugLogger.instance.warning('⚠ Firestore読み込みエラー: $e');
+    }
+  }
 
   void _addAisaConversation(String transcript) {
     if (conversationProvider == null) {
