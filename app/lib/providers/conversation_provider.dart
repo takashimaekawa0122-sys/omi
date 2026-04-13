@@ -371,7 +371,7 @@ class ConversationProvider extends ChangeNotifier {
       }
     }
     // Firestoreから直接読み込み（退避に含まれない初回起動時のデータも確実に復元）
-    await _loadAisaFromFirestore();
+    await _mergeAisaConversations();
 
     if (conversations.any((c) => c.id.startsWith('aisa_'))) {
       conversations.sort((a, b) => (b.startedAt ?? b.createdAt).compareTo(a.startedAt ?? a.createdAt));
@@ -385,13 +385,18 @@ class ConversationProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// [A.I.S.A.] FirestoreからAISA会話を読み込んでconversationsリストにマージする
-  Future<void> _loadAisaFromFirestore() async {
+  /// [A.I.S.A.] FirestoreからAISA会話を読み込んでconversationsリストにマージし、
+  /// 新しい順にソートしてUIを更新する
+  Future<void> _mergeAisaConversations() async {
     try {
       final entries = await AisaFirestoreService.instance.loadRecentEntries(days: 7);
-      if (entries.isEmpty) return;
+      if (entries.isEmpty) {
+        Logger.debug('[AISA] Firestore: 過去7日の会話なし');
+        return;
+      }
 
       final existingIds = conversations.map((c) => c.id).toSet();
+      int added = 0;
       for (final entry in entries) {
         final id = 'aisa_fs_${entry.id}';
         if (existingIds.contains(id)) continue;
@@ -407,8 +412,20 @@ class ConversationProvider extends ChangeNotifier {
           source: ConversationSource.phone,
           status: ConversationStatus.completed,
         ));
+        added++;
       }
-      Logger.debug('[AISA] fetchConversations後にFirestoreから${entries.length}件復元');
+
+      if (added == 0) return; // 新規追加なしならUIを更新しない
+
+      // 新しい順にソート
+      conversations.sort((a, b) => (b.startedAt ?? b.createdAt).compareTo(a.startedAt ?? a.createdAt));
+
+      // UI用のグルーピングと検索リストを更新
+      _groupConversationsByDateWithoutNotify();
+      searchedConversations = conversations;
+
+      Logger.debug('[AISA] Firestoreから$added件を追加（合計${conversations.length}件）');
+      notifyListeners();
     } catch (e) {
       Logger.debug('[AISA] Firestore復元エラー: $e');
     }
@@ -417,6 +434,10 @@ class ConversationProvider extends ChangeNotifier {
   Future getInitialConversations() async {
     await fetchConversations();
     await checkHasDailySummaries();
+    // [A.I.S.A.] サーバー取得完了後にFirestoreを読み込む
+    // fetchConversations内でも読み込むが、Firestore初期化タイミングの問題で
+    // 失敗するケースがあるため、ここで確実にもう一度読み込む
+    await _mergeAisaConversations();
   }
 
   List<ServerConversation> _filterOutConvos(List<ServerConversation> convos) {
