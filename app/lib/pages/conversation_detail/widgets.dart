@@ -10,6 +10,7 @@ import 'package:provider/provider.dart';
 import 'package:tuple/tuple.dart';
 
 import 'package:omi/backend/http/api/conversations.dart';
+import 'package:omi/widgets/aisa_chat_bubble_widget.dart';
 import 'package:omi/backend/http/webhooks.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/app.dart';
@@ -763,11 +764,13 @@ class AppResultDetailWidget extends StatelessWidget {
                       ),
                     ],
                   )
-                : ConversationMarkdownWidget(
-                    content: content,
-                    searchQuery: searchQuery,
-                    currentResultIndex: currentResultIndex,
-                  ),
+                : content.contains('[自分]')
+                    ? AisaChatBubbleWidget(content: content)
+                    : ConversationMarkdownWidget(
+                        content: content,
+                        searchQuery: searchQuery,
+                        currentResultIndex: currentResultIndex,
+                      ),
           ),
 
           // App info in a more subtle format below the content - only show if content is not empty
