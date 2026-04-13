@@ -62,7 +62,44 @@ class AisaTranscriptionService {
     return await _transcribe(wavFile, previousContext: previousContext); // 例外はそのまま上に伝播
   }
 
-  Future<String?> _transcribe(File wavFile, {String? previousContext}) async {
+  /// Groq Whisperで文字起こし＋ハルシネーション除去のみ（Claude校正なし）
+  /// チャンク単位の軽量処理。会話バッファリングの各ティックで使う。
+  /// WAVファイルの削除は呼び出し元の責任。
+  Future<String?> transcribeChunkOnly(File wavFile, {String? previousContext}) async {
+    return await _transcribe(wavFile, previousContext: previousContext, skipClaude: true);
+  }
+
+  /// 蓄積済みテキストをClaude校正＋話者分離してFirestoreに保存する
+  /// 会話バッファのフラッシュ時に呼ぶ。
+  Future<String?> correctAndSave(String rawText) async {
+    if (rawText.trim().isEmpty) return null;
+    try {
+      String result = rawText;
+      if (_anthropicApiKey.isNotEmpty) {
+        AisaDebugLogger.instance.info('Claude校正: 開始 (${rawText.length}文字)');
+        final corrected = await _correctWithClaude(rawText);
+        if (corrected != null && corrected.trim().isNotEmpty) {
+          result = corrected;
+        }
+      }
+      // Firestore保存
+      try {
+        await AisaFirestoreService.instance.saveTranscript(result);
+      } catch (e) {
+        debugPrint('[AISA] Firestore保存失敗（UIには表示）: $e');
+      }
+      return result;
+    } catch (e) {
+      debugPrint('[AISA] Claude校正失敗（生テキストを使用）: $e');
+      // 校正失敗時は生テキストをそのまま保存
+      try {
+        await AisaFirestoreService.instance.saveTranscript(rawText);
+      } catch (_) {}
+      return rawText;
+    }
+  }
+
+  Future<String?> _transcribe(File wavFile, {String? previousContext, bool skipClaude = false}) async {
     // APIキー未設定チェック（ビルド時に--dart-define=GROQ_API_KEY=...が必要）
     if (_groqApiKey.isEmpty) {
       AisaDebugLogger.instance.error('❌ GROQ_API_KEY未設定！build.sh でリビルドしてください');
@@ -147,8 +184,9 @@ class AisaTranscriptionService {
     }
 
     // Claude Haiku後処理: 文脈から明らかに誤った漢字・同音異義語を修正
-    // APIキー未設定の場合はスキップ（Whisper結果をそのまま返す）
-    if (_anthropicApiKey.isNotEmpty) {
+    // skipClaude=trueの場合はWhisper結果のみ返す（チャンク単位の軽量処理用）
+    // APIキー未設定の場合もスキップ
+    if (!skipClaude && _anthropicApiKey.isNotEmpty) {
       AisaDebugLogger.instance.info('Claude校正: 開始 (${filtered.length}文字)');
       return await _correctWithClaude(filtered);
     }

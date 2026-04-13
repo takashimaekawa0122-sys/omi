@@ -1369,123 +1369,117 @@ class CaptureProvider extends ChangeNotifier
   }
 
   /// 5秒ごとに呼ばれるティック処理。
-  /// 音声があればバッファに蓄積し、無音が続くか最大時間に達したらまとめて文字起こしする。
+  /// 各ティック: Groq Whisperで文字起こし＋ハルシネーション除去（Claude無し）
+  /// 無音15秒 or 3分経過: 蓄積テキストをまとめてClaude校正→Firestore保存→会話表示
   Future<void> _triggerAisaTranscription({bool forceFlush = false}) async {
     if (_aisaFrameBuffer.isEmpty && !forceFlush) {
       // 新しいフレームなし
-      if (_aisaPendingFrames.isNotEmpty) {
+      if (_aisaAccumulatedText.isNotEmpty) {
         _aisaSilentTicks++;
+        _aisaBufferTicks++;
         // 無音が閾値に達した → 会話の区切りと判定してフラッシュ
         if (_aisaSilentTicks >= _aisaSilenceThreshold) {
-          AisaDebugLogger.instance.info('📝 無音${_aisaSilentTicks * 5}秒検出 → 会話をまとめて文字起こし');
-          await _flushAisaBuffer();
+          AisaDebugLogger.instance.info('📝 無音${_aisaSilentTicks * 5}秒検出 → まとめてClaude校正');
+          await _flushAisaText();
         }
       }
       return;
     }
 
-    // 新しいフレームがある場合
+    // 新しいフレームがある場合 → Groqで個別に文字起こし（ハルシネーション除去あり、Claude無し）
     if (_aisaFrameBuffer.isNotEmpty) {
       final frames = List<List<int>>.from(_aisaFrameBuffer);
       _aisaFrameBuffer.clear();
 
-      // このティックの音声にVADをかける
-      File? tempWav;
+      File? wavFile;
       try {
         final wavUtil = WavBytesUtil(codec: _aisaCodec, framesPerSecond: _aisaCodec.getFramesPerSecond());
-        tempWav = await wavUtil.createWavByCodec(frames,
-            filename: 'aisa_vad_${DateTime.now().millisecondsSinceEpoch}.wav');
-        final wavBytes = await tempWav.readAsBytes();
+        wavFile = await wavUtil.createWavByCodec(frames,
+            filename: 'aisa_chunk_${DateTime.now().millisecondsSinceEpoch}.wav');
+        final wavBytes = await wavFile.readAsBytes();
 
-        if (_hasVoiceActivity(wavBytes)) {
-          // 音声あり → 蓄積バッファに追加
-          _aisaPendingFrames.addAll(frames);
+        if (!_hasVoiceActivity(wavBytes)) {
+          _aisaSilentTicks++;
+          return;
+        }
+
+        // Groq Whisper + ハルシネーション除去のみ（Claude校正なし）
+        final chunk = await AisaTranscriptionService.instance.transcribeChunkOnly(
+          wavFile,
+          previousContext: _aisaAccumulatedText.isNotEmpty
+              ? _aisaAccumulatedText.substring(
+                  (_aisaAccumulatedText.length - 200).clamp(0, _aisaAccumulatedText.length))
+              : null,
+        );
+        wavFile = null; // transcribeChunkOnlyは内部でファイルを削除しないため、finallyで削除
+
+        if (chunk != null && chunk.trim().isNotEmpty) {
+          // クリーンなテキストを蓄積
+          if (_aisaAccumulatedText.isNotEmpty) {
+            _aisaAccumulatedText += chunk;
+          } else {
+            _aisaAccumulatedText = chunk;
+          }
           _aisaSilentTicks = 0;
           _aisaBufferTicks++;
-          _aisaLastVoiceAt = DateTime.now();
+          AisaDebugLogger.instance.info('📎 チャンク蓄積: "${chunk.substring(0, chunk.length.clamp(0, 40))}..." (合計${_aisaAccumulatedText.length}文字)');
         } else {
-          // 無音 → 蓄積はしないが無音カウントを増やす
+          // ハルシネーションとして除去された → 無音扱い
           _aisaSilentTicks++;
+          AisaDebugLogger.instance.info('📎 チャンクをハルシネーション除去（蓄積テキストは維持）');
         }
       } catch (e) {
-        Logger.debug('[AISA] VADチェック失敗: $e');
-        // エラー時はそのまま蓄積（安全側）
-        _aisaPendingFrames.addAll(frames);
-        _aisaBufferTicks++;
+        Logger.debug('[AISA] チャンク処理失敗: $e');
       } finally {
         try {
-          if (tempWav != null && await tempWav.exists()) await tempWav.delete();
+          if (wavFile != null && await wavFile.exists()) await wavFile.delete();
         } catch (_) {}
       }
     }
 
     // 最大バッファ時間に達した → 強制フラッシュ
-    if (_aisaBufferTicks >= _aisaMaxBufferTicks) {
-      AisaDebugLogger.instance.info('📝 最大${_aisaBufferTicks * 5}秒到達 → 強制フラッシュ');
-      await _flushAisaBuffer();
+    if (_aisaBufferTicks >= _aisaMaxBufferTicks && _aisaAccumulatedText.isNotEmpty) {
+      AisaDebugLogger.instance.info('📝 最大${_aisaBufferTicks * 5}秒到達 → 強制Claude校正');
+      await _flushAisaText();
       return;
     }
 
     // 無音が続いている場合もフラッシュ判定
-    if (_aisaPendingFrames.isNotEmpty && _aisaSilentTicks >= _aisaSilenceThreshold) {
-      AisaDebugLogger.instance.info('📝 無音${_aisaSilentTicks * 5}秒検出 → 会話をまとめて文字起こし');
-      await _flushAisaBuffer();
+    if (_aisaAccumulatedText.isNotEmpty && _aisaSilentTicks >= _aisaSilenceThreshold) {
+      AisaDebugLogger.instance.info('📝 無音${_aisaSilentTicks * 5}秒検出 → まとめてClaude校正');
+      await _flushAisaText();
     }
 
     // 強制フラッシュ（アプリ終了時など）
-    if (forceFlush && _aisaPendingFrames.isNotEmpty) {
-      await _flushAisaBuffer();
+    if (forceFlush && _aisaAccumulatedText.isNotEmpty) {
+      await _flushAisaText();
     }
   }
 
-  /// 蓄積した音声バッファをまとめてGroq Whisperに送信し、文字起こしする
-  Future<void> _flushAisaBuffer() async {
-    if (_aisaPendingFrames.isEmpty) return;
+  /// 蓄積済みテキストをClaude校正→Firestore保存→会話リストに追加
+  Future<void> _flushAisaText() async {
+    if (_aisaAccumulatedText.isEmpty) return;
 
-    final frames = List<List<int>>.from(_aisaPendingFrames);
-    _aisaPendingFrames.clear();
+    final rawText = _aisaAccumulatedText;
+    _aisaAccumulatedText = '';
     _aisaSilentTicks = 0;
     _aisaBufferTicks = 0;
+    _aisaPendingFrames.clear();
 
-    Logger.debug('[AISA] まとめて文字起こし: ${frames.length}フレーム (codec: $_aisaCodec)');
-    AisaDebugLogger.instance.info('▶ まとめて文字起こし開始: ${frames.length}フレーム');
+    AisaDebugLogger.instance.info('▶ Claude校正+保存開始: ${rawText.length}文字');
 
-    File? wavFile;
     try {
-      final wavUtil = WavBytesUtil(codec: _aisaCodec, framesPerSecond: _aisaCodec.getFramesPerSecond());
-      wavFile = await wavUtil.createWavByCodec(frames,
-          filename: 'aisa_${DateTime.now().millisecondsSinceEpoch}.wav');
-
-      final wavBytes = await wavFile.readAsBytes();
-      if (!_hasVoiceActivity(wavBytes)) {
-        Logger.debug('[AISA] バッファ全体が無音 → スキップ');
-        return;
-      }
-
-      final fileToProcess = wavFile;
-      wavFile = null;
-      final transcript = await AisaTranscriptionService.instance.processAndSave(fileToProcess);
-      if (transcript != null && transcript.trim().isNotEmpty) {
-        // 蓄積テキストに追記
-        if (_aisaAccumulatedText.isNotEmpty) {
-          _aisaAccumulatedText += '\n$transcript';
-        } else {
-          _aisaAccumulatedText = transcript;
-        }
-        AisaDebugLogger.instance.info('✅ 文字起こし成功: "${transcript.substring(0, transcript.length.clamp(0, 60))}${transcript.length > 60 ? "…" : ""}"');
-        // 会話として追加（蓄積全体をまとめる）
-        _addAisaConversation(_aisaAccumulatedText);
-        _aisaAccumulatedText = '';
+      final result = await AisaTranscriptionService.instance.correctAndSave(rawText);
+      if (result != null && result.trim().isNotEmpty) {
+        AisaDebugLogger.instance.info('✅ 会話完成: "${result.substring(0, result.length.clamp(0, 60))}${result.length > 60 ? "…" : ""}"');
+        _addAisaConversation(result);
       } else {
-        AisaDebugLogger.instance.warning('⚠ 文字起こし結果なし（無音 or Groqエラー）');
+        AisaDebugLogger.instance.warning('⚠ Claude校正結果なし');
       }
     } catch (e) {
-      AisaDebugLogger.instance.error('❌ 音声処理失敗: $e');
-      Logger.debug('[AISA] 音声処理失敗: $e');
-    } finally {
-      try {
-        if (wavFile != null && await wavFile.exists()) await wavFile.delete();
-      } catch (_) {}
+      AisaDebugLogger.instance.error('❌ Claude校正/保存失敗: $e');
+      // 失敗しても生テキストを表示する
+      _addAisaConversation(rawText);
     }
   }
 
