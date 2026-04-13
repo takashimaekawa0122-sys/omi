@@ -51,9 +51,21 @@ class ConversationProvider extends ChangeNotifier {
 
   bool isFetchingConversations = false;
 
+  // [A.I.S.A.] Firestoreからの会話復元が完了したかどうか
+  bool _aisaFirestoreLoaded = false;
+
   ConversationProvider() {
     _setupMergeListener();
     _loadSettings();
+    // [A.I.S.A.] 3秒後にFirestoreからAISA会話を読み込む
+    // 他の初期化（Firebase、認証、サーバー取得）が完了するのに十分な時間を確保
+    // これがAISA会話復元の「最後の砦」— 他のパスで呼ばれなくても確実に実行される
+    Future.delayed(const Duration(seconds: 3), () async {
+      if (!_aisaFirestoreLoaded) {
+        debugPrint('[AISA] 遅延ロード: Firestoreから会話を読み込み開始');
+        await mergeAisaConversations();
+      }
+    });
   }
 
   void _loadSettings() {
@@ -390,16 +402,24 @@ class ConversationProvider extends ChangeNotifier {
   /// publicメソッド: home/page.dart, conversations_page.dart から直接呼ばれる
   Future<void> mergeAisaConversations() async {
     try {
+      debugPrint('[AISA merge] ===== 開始 =====');
+
       // Firestore初期化を待つ（まだ未初期化の場合は初期化を試みる）
       await AisaFirestoreService.instance.initialize();
+      debugPrint('[AISA merge] Firestore初期化OK');
 
       final entries = await AisaFirestoreService.instance.loadRecentEntries(days: 7);
       debugPrint('[AISA merge] Firestore読み込み結果: ${entries.length}件');
+      _aisaFirestoreLoaded = true;
+
       if (entries.isEmpty) {
+        debugPrint('[AISA merge] エントリなし → 終了');
         return;
       }
 
       final existingIds = conversations.map((c) => c.id).toSet();
+      debugPrint('[AISA merge] 既存conversations: ${conversations.length}件, うちAISA: ${conversations.where((c) => c.id.startsWith("aisa_")).length}件');
+
       int added = 0;
       for (final entry in entries) {
         final id = 'aisa_fs_${entry.id}';
@@ -419,7 +439,12 @@ class ConversationProvider extends ChangeNotifier {
         added++;
       }
 
-      if (added == 0) return;
+      debugPrint('[AISA merge] 新規追加: $added件');
+
+      if (added == 0) {
+        debugPrint('[AISA merge] 全て既存 → 終了');
+        return;
+      }
 
       // 新しい順にソート
       conversations.sort((a, b) => (b.startedAt ?? b.createdAt).compareTo(a.startedAt ?? a.createdAt));
@@ -428,10 +453,11 @@ class ConversationProvider extends ChangeNotifier {
       _groupConversationsByDateWithoutNotify();
       searchedConversations = conversations;
 
-      debugPrint('[AISA merge] $added件追加（合計${conversations.length}件）');
+      debugPrint('[AISA merge] ===== 完了: $added件追加, 合計${conversations.length}件, grouped=${groupedConversations.length}日分 =====');
       notifyListeners();
-    } catch (e) {
+    } catch (e, stack) {
       debugPrint('[AISA merge] ❌ Firestore復元エラー: $e');
+      debugPrint('[AISA merge] スタックトレース: $stack');
     }
   }
 

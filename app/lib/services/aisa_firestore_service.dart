@@ -119,8 +119,10 @@ class AisaFirestoreService {
   /// Firestoreから今日の会話を読み込む（起動時に呼び出し）
   /// 直近7日分を取得して会話リストに復元する
   Future<List<AisaEntry>> loadRecentEntries({int days = 7}) async {
+    debugPrint('[AISA load] loadRecentEntries開始: initialized=$_initialized, firestore=${_firestore != null}');
     if (!_initialized || _firestore == null) {
       AisaDebugLogger.instance.warning('⚠ Firestore未初期化 - 読み込みスキップ');
+      debugPrint('[AISA load] ❌ Firestore未初期化のため読み込み不可');
       return [];
     }
 
@@ -135,14 +137,14 @@ class AisaFirestoreService {
           '${date.day.toString().padLeft(2, '0')}';
 
       try {
-        // orderByのみ使用（where+orderByの複合インデックスが未設定だとエラーになるため）
-        // deleted==trueのエントリはDart側でフィルタする
+        // orderByなしでシンプルに全件取得（orderByインデックスエラーを回避）
         final snapshot = await _firestore!
             .collection('sessions')
             .doc(dateStr)
             .collection('entries')
-            .orderBy('timestampMs', descending: false)
             .get();
+
+        debugPrint('[AISA load] $dateStr: ${snapshot.docs.length}件取得');
 
         for (final doc in snapshot.docs) {
           final data = doc.data();
@@ -159,12 +161,16 @@ class AisaFirestoreService {
           ));
         }
       } catch (e) {
-        debugPrint('[AISA] Firestore読み込みエラー ($dateStr): $e');
+        debugPrint('[AISA load] ❌ $dateStr エラー: $e');
+        AisaDebugLogger.instance.error('Firestore読み込みエラー ($dateStr): $e');
       }
     }
 
+    // タイムスタンプでソート（新しい順）
+    entries.sort((a, b) => b.timestamp.compareTo(a.timestamp));
+
     AisaDebugLogger.instance.info('Firestore読み込み: ${entries.length}件 (${days}日分)');
-    debugPrint('[AISA] Firestore読み込み完了: ${entries.length}件');
+    debugPrint('[AISA load] 読み込み完了: ${entries.length}件');
     return entries;
   }
 }
