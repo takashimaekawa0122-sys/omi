@@ -70,6 +70,15 @@ class AisaTranscriptionService {
     }
 
     final fileSize = await wavFile.length();
+
+    // 無音検出: WAVファイルの音量(RMS)が極端に低い場合はAPIを呼ばない
+    // 無音データをWhisperに送るとハルシネーション（「ご視聴ありがとう」等）を生成する
+    if (await _isSilentWav(wavFile)) {
+      AisaDebugLogger.instance.info('無音検出 → Groq APIスキップ (${(fileSize / 1024).toStringAsFixed(0)}KB)');
+      debugPrint('[AISA] 無音検出 → APIスキップ: ${wavFile.path}');
+      return null;
+    }
+
     AisaDebugLogger.instance.info('Groq API送信: ${(fileSize / 1024).toStringAsFixed(0)}KB'
         '${previousContext != null ? ", 文脈あり(${previousContext.length}chars)" : ""}');
     debugPrint('[AISA] Groq送信: ${wavFile.path} (${(fileSize / 1024).toStringAsFixed(0)}KB)');
@@ -242,11 +251,20 @@ class AisaTranscriptionService {
     const substringHallucinations = [
       'ペンダント型マイク',
       'ペンダントマイク',
+      'ペンダントの音声',
       '句読点を含めて正確に文字起こし',
       '背景音やノイズは無視',
       'マイクに近い話者',
       '音声を聞いてみましょう',
+      '音声を聞き取ると',
+      '音声が聞こえます',
       '録音した音声を',
+      '音声認識テキスト',
+      '校正対象の',
+      '校正してほしい',
+      'テキストが記載されていません',
+      'テキストをご提供',
+      '申し訳ございませんが',
     ];
     for (final h in substringHallucinations) {
       if (t.contains(h)) return true;
@@ -309,6 +327,20 @@ class AisaTranscriptionService {
       }
 
       final result = corrected.trim();
+
+      // Claude校正後のテキストもハルシネーションチェック
+      // Claudeが「テキストが記載されていません」等の応答を返すケースを捕捉
+      if (_isHallucination(result)) {
+        AisaDebugLogger.instance.warning('⚠ Claude校正結果がハルシネーション → 破棄: "$result"');
+        return null;
+      }
+
+      // Claude校正結果が元テキストより大幅に長い場合は校正を拒否（余計な説明を追加している）
+      if (result.length > whisperText.length * 2 + 20) {
+        AisaDebugLogger.instance.warning('⚠ Claude校正が過剰に長い → Whisper結果を使用 (${whisperText.length}→${result.length}文字)');
+        return whisperText;
+      }
+
       if (result != whisperText) {
         AisaDebugLogger.instance.info('Claude校正: 変更あり (${whisperText.length}→${result.length}文字)');
         debugPrint('[AISA Claude] 校正完了: ${whisperText.length}文字 → ${result.length}文字');
@@ -320,6 +352,49 @@ class AisaTranscriptionService {
       AisaDebugLogger.instance.warning('⚠ Claude校正エラー (Whisper結果を使用): $e');
       debugPrint('[AISA Claude] 校正エラー（Whisper結果を使用）: $e');
       return whisperText; // エラー時はWhisper結果をそのまま返す
+    }
+  }
+
+  /// WAVファイルの音量(RMS)を計算し、無音に近いかどうかを判定する
+  /// WAVヘッダー(44バイト)をスキップして16bit PCMサンプルのRMSを計算
+  /// RMS < 50 の場合は無音と判定（通常の会話は 200〜5000）
+  static Future<bool> _isSilentWav(File wavFile) async {
+    try {
+      final bytes = await wavFile.readAsBytes();
+      if (bytes.length < 100) return true; // ヘッダーのみ = 無音
+
+      // WAVヘッダーをスキップ（標準44バイト）
+      const headerSize = 44;
+      if (bytes.length <= headerSize) return true;
+
+      // 16bit PCMサンプルのRMSを計算（最大10000サンプルをチェック）
+      final dataBytes = bytes.sublist(headerSize);
+      final sampleCount = dataBytes.length ~/ 2; // 16bit = 2バイト
+      if (sampleCount == 0) return true;
+
+      final step = sampleCount > 10000 ? sampleCount ~/ 10000 : 1;
+      double sumSquares = 0;
+      int count = 0;
+
+      for (int i = 0; i < dataBytes.length - 1; i += step * 2) {
+        // Little-endian 16bit signed
+        int sample = dataBytes[i] | (dataBytes[i + 1] << 8);
+        if (sample >= 32768) sample -= 65536; // unsigned → signed
+        sumSquares += sample * sample;
+        count++;
+      }
+
+      // 閾値を二乗で比較（dart:mathのsqrtを使わない）
+      // RMS 50 → 50^2 = 2500
+      final isSilent = (count == 0) || (sumSquares / count < 2500);
+
+      if (isSilent) {
+        debugPrint('[AISA VAD] 無音判定: RMS²=${count > 0 ? (sumSquares / count).toStringAsFixed(0) : "0"} (閾値: 2500)');
+      }
+      return isSilent;
+    } catch (e) {
+      debugPrint('[AISA VAD] 音量チェック失敗（APIに送信する）: $e');
+      return false; // エラー時はAPIに送る（安全側に倒す）
     }
   }
 }
