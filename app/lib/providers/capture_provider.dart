@@ -208,9 +208,14 @@ class CaptureProvider extends ChangeNotifier
     }
 
     // AISA: 初回のみFirestoreから過去の会話を読み込んで会話リストに復元
+    // awaitはできない（updateProviderInstancesはsyncメソッド）ため、
+    // fetchConversations()完了後にリロードを保証するためコールバックを使用
     if (cp != null && !_firestoreLoaded) {
       _firestoreLoaded = true;
-      _loadConversationsFromFirestore();
+      _loadConversationsFromFirestore().then((_) {
+        // Firestore読み込み完了後にUIを更新（fetchConversationsの後でも確実に表示される）
+        notifyListeners();
+      });
     }
 
     notifyListeners();

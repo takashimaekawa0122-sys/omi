@@ -339,6 +339,10 @@ class ConversationProvider extends ChangeNotifier {
     totalSearchPages = 0;
     searchedConversations = [];
 
+    // [A.I.S.A.] サーバー取得前にAISAローカル会話を退避（aisa_プレフィックスID）
+    // サーバーにはAISA会話が存在しないため、上書きで消えてしまうのを防ぐ
+    final aisaConversations = conversations.where((c) => c.id.startsWith('aisa_')).toList();
+
     setLoadingConversations(true);
     conversations = await _getConversationsFromServer();
     setLoadingConversations(false);
@@ -356,6 +360,19 @@ class ConversationProvider extends ChangeNotifier {
       // Only cache when viewing all folders
       SharedPreferencesUtil().cachedConversations = conversations;
     }
+
+    // [A.I.S.A.] 退避したAISA会話を復元し、重複がないよう追加
+    if (aisaConversations.isNotEmpty) {
+      final existingIds = conversations.map((c) => c.id).toSet();
+      for (final aisa in aisaConversations) {
+        if (!existingIds.contains(aisa.id)) {
+          conversations.add(aisa);
+        }
+      }
+      // 時系列で再ソート（新しい順）
+      conversations.sort((a, b) => (b.startedAt ?? b.createdAt).compareTo(a.startedAt ?? a.createdAt));
+    }
+
     if (searchedConversations.isEmpty) {
       searchedConversations = conversations;
     }
