@@ -1574,7 +1574,7 @@ class CaptureProvider extends ChangeNotifier
       status: ConversationStatus.completed,
     );
     conversationProvider!.upsertConversation(conversation);
-    Logger.debug('[AISA] 会話を追加: $title $emoji');
+    Logger.debug('[AISA] 会話を追加: ${parsed.title} ${parsed.emoji}');
   }
 
   Future<void> _autoSyncSessionWals(int sessionStartSeconds, String conversationId) async {
