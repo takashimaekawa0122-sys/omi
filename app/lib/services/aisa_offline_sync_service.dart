@@ -152,9 +152,9 @@ class AisaOfflineSyncService {
 
         if (validWavBytes.isEmpty) continue;
 
-        // バッチ内の有効チャンク率が低い場合はスキップ
-        // 20チャンク中2件以下 = ほぼ環境音のセッション → API呼び出しを節約
-        if (validWavBytes.length <= 2 && batch.length >= 5) {
+        // バッチ内の有効チャンク率が極端に低い場合はスキップ
+        // 5チャンク以上のバッチで有効が1件だけ = 一瞬の物音 → API呼び出しを節約
+        if (validWavBytes.length <= 1 && batch.length >= 5) {
           debugPrint('[AISA Offline] バッチスキップ: ${validWavBytes.length}/${batch.length}チャンクのみ有効 → 環境音と判定');
           skipCount += validWavBytes.length;
           continue;
