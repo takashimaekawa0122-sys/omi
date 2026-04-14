@@ -12,6 +12,7 @@ import 'package:omi/services/wals/sdcard_wal_sync.dart';
 import 'package:omi/services/wals/storage_sync.dart';
 import 'package:omi/services/wals/wal.dart';
 import 'package:omi/services/wals/wal_interfaces.dart';
+import 'package:omi/utils/aisa_debug_logger.dart';
 import 'package:omi/utils/debug_log_manager.dart';
 import 'package:omi/utils/logger.dart';
 
@@ -192,11 +193,14 @@ class WalSyncs implements IWalSync {
     // Refresh file list from device via BLE (safe — not syncing yet)
     await _storageSync.refreshWalsFromDevice();
     final storageMissing = await _storageSync.getMissingWals();
+    AisaDebugLogger.instance.info('[Sync] Phase 0: LittleFSファイル ${storageMissing.length}件検出');
     if (storageMissing.isNotEmpty) {
       Logger.debug("WalSyncs: Phase 0 - Downloading ${storageMissing.length} multi-file storage files to phone");
       DebugLogManager.logInfo('Sync Phase 0: Multi-file storage sync');
+      AisaDebugLogger.instance.info('[Sync] Phase 0: BLEダウンロード開始 (${storageMissing.length}件)');
       progress?.onWalSyncedProgress(0.0, phase: SyncPhase.downloadingFromDevice);
       await _storageSync.syncAll(progress: progress);
+      AisaDebugLogger.instance.info('[Sync] Phase 0: BLEダウンロード完了');
     }
 
     if (_isCancelled) {
@@ -212,19 +216,24 @@ class WalSyncs implements IWalSync {
     // ここで必ず最新のペンダントストレージ状態を取得し直す。
     await _sdcardSync.start();
     final missingSDCardWals = (await _sdcardSync.getMissingWals()).where((w) => w.status == WalStatus.miss).toList();
+    final wifiSupported = await _sdcardSync.isWifiSyncSupported();
+    AisaDebugLogger.instance.info('[Sync] Phase 1a: SDカードWAL ${missingSDCardWals.length}件, WiFi対応=$wifiSupported');
 
     bool usedWifi = false;
     if (missingSDCardWals.isNotEmpty) {
       final preferredMethod = SharedPreferencesUtil().preferredSyncMethod;
-      final wifiSupported = await _sdcardSync.isWifiSyncSupported();
 
       if (preferredMethod == 'wifi' && wifiSupported) {
         usedWifi = true;
+        AisaDebugLogger.instance.info('[Sync] Phase 1a: WiFi転送開始 (${missingSDCardWals.length}件)');
         DebugLogManager.logInfo('SD card sync using WiFi', {'walCount': missingSDCardWals.length});
         await _sdcardSync.syncWithWifi(progress: progress, connectionListener: connectionListener);
+        AisaDebugLogger.instance.info('[Sync] Phase 1a: WiFi転送完了');
       } else {
+        AisaDebugLogger.instance.info('[Sync] Phase 1a: BLE転送開始 (${missingSDCardWals.length}件, method=$preferredMethod)');
         DebugLogManager.logInfo('SD card sync using BLE', {'walCount': missingSDCardWals.length});
         await _sdcardSync.syncAll(progress: progress);
+        AisaDebugLogger.instance.info('[Sync] Phase 1a: BLE転送完了');
       }
     }
 
@@ -269,11 +278,15 @@ class WalSyncs implements IWalSync {
       final diskMissWals = allMissing
           .where((w) => w.storage == WalStorage.disk && w.status == WalStatus.miss)
           .toList();
+      AisaDebugLogger.instance.info('[Sync] AISA Phase: 未処理WAL ${diskMissWals.length}件');
       if (diskMissWals.isNotEmpty && !AisaOfflineSyncService.instance.isSyncing) {
         Logger.debug("WalSyncs: AISA - ${diskMissWals.length}件のWALを文字起こし");
+        AisaDebugLogger.instance.info('[Sync] AISA Phase: Groq文字起こし開始');
         await AisaOfflineSyncService.instance.syncPendingWals(diskMissWals, _phoneSync);
+        AisaDebugLogger.instance.info('[Sync] AISA Phase: Groq文字起こし完了');
       } else if (AisaOfflineSyncService.instance.isSyncing) {
         Logger.debug("WalSyncs: AISA - 既に文字起こし実行中のためスキップ");
+        AisaDebugLogger.instance.info('[Sync] AISA Phase: 既に実行中のためスキップ');
       }
     } catch (e) {
       Logger.debug("WalSyncs: AISA phase error (continuing to Phase 2): $e");
