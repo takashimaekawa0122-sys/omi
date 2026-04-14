@@ -418,12 +418,31 @@ class ConversationProvider extends ChangeNotifier {
       }
 
       final existingIds = conversations.map((c) => c.id).toSet();
+      // 既存AISA会話の内容ハッシュを収集（重複検出用）
+      final existingAisaContentKeys = <String>{};
+      for (final c in conversations) {
+        if (c.id.startsWith('aisa_')) {
+          // 本文の先頭100文字をキーにして重複判定
+          final body = c.structured.overview.trim();
+          if (body.isNotEmpty) {
+            existingAisaContentKeys.add(body.substring(0, body.length.clamp(0, 100)));
+          }
+        }
+      }
       debugPrint('[AISA merge] 既存conversations: ${conversations.length}件, うちAISA: ${conversations.where((c) => c.id.startsWith("aisa_")).length}件');
 
       int added = 0;
+      int skippedDup = 0;
       for (final entry in entries) {
         final id = 'aisa_fs_${entry.id}';
         if (existingIds.contains(id)) continue;
+
+        // 内容が既存AISA会話と一致する場合はスキップ（リアルタイム追加分との重複防止）
+        final entryContentKey = entry.text.trim().substring(0, entry.text.trim().length.clamp(0, 100));
+        if (existingAisaContentKeys.contains(entryContentKey)) {
+          skippedDup++;
+          continue;
+        }
         final parsed = _parseAisaTitleAndEmoji(entry.text, entry.timestamp);
         conversations.add(ServerConversation(
           id: id,
@@ -440,7 +459,7 @@ class ConversationProvider extends ChangeNotifier {
         added++;
       }
 
-      debugPrint('[AISA merge] 新規追加: $added件');
+      debugPrint('[AISA merge] 新規追加: $added件, 重複スキップ: $skippedDup件');
 
       if (added == 0) {
         debugPrint('[AISA merge] 全て既存 → 終了');
