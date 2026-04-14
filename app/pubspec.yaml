@@ -176,7 +176,7 @@ flutter_launcher_icons:
   remove_alpha_ios: true
   web:
     generate: true
-  image_path: "assets/images/app_launcher_icon.png"
+  image_path: "assets/images/aisa_app_icon.jpg"
 
 flutter:
   generate: true
