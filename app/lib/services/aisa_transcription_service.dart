@@ -305,10 +305,21 @@ class AisaTranscriptionService {
 
   /// Whisperが無音・ノイズから生成する定型ハルシネーションを検出する
   /// 実際に発話していないのにWhisperが勝手に生成するフレーズのブロックリスト
+  /// 外部からもハルシネーション判定を利用可能にする（オフライン同期等）
+  static bool isHallucination(String text) => _isHallucination(text);
+
   static bool _isHallucination(String text) {
     final t = text.trim();
     // 短すぎるテキスト（3文字以下）は意味のある発話ではない可能性が高い
     if (t.length <= 3) return true;
+
+    // 同じフレーズの繰り返し検出（ハルシネーションの典型パターン）
+    // 例: 「ペンダント音ペンダント音ペンダント音...」
+    // 例: 「口の中で音が聞こえないように注意してください。口の中で...」
+    if (_isRepetitive(t)) return true;
+
+    // Claude校正後の削除メッセージもブロック
+    if (t.contains('削除対象') || t.contains('全文削除')) return true;
 
     // 完全一致・末尾句読点バリエーション用の定型ハルシネーション
     const exactHallucinations = [
@@ -333,14 +344,13 @@ class AisaTranscriptionService {
       if (t == h || t == '$h。' || t == '$h！' || t == '$h.') return true;
     }
 
-    // プロンプトエコー系は部分一致で判定する
-    // Whisperが送信プロンプトの単語をそのまま出力に混ぜるケースがあり、
-    // 「ペンダント型マイクで録音した音声を、ペンダント型マイクで再生してください」のような
-    // 微妙にバリエーションした派生を完全一致では捕まえられないため。
+    // プロンプトエコー系・ノイズ系は部分一致で判定
     const substringHallucinations = [
       'ペンダント型マイク',
       'ペンダントマイク',
       'ペンダントの音声',
+      'ペンダント音',
+      '口の中で音が聞こえない',
       '句読点を含めて正確に文字起こし',
       '背景音やノイズは無視',
       'マイクに近い話者',
@@ -356,6 +366,41 @@ class AisaTranscriptionService {
     ];
     for (final h in substringHallucinations) {
       if (t.contains(h)) return true;
+    }
+
+    return false;
+  }
+
+  /// 同じフレーズが繰り返されているかチェック
+  /// テキストの先頭20文字が3回以上出現していればハルシネーション
+  static bool _isRepetitive(String text) {
+    if (text.length < 30) return false;
+
+    // 句読点で分割して同一フレーズの繰り返しをチェック
+    final sentences = text.split(RegExp(r'[。．.、]')).where((s) => s.trim().isNotEmpty).toList();
+    if (sentences.length >= 3) {
+      final first = sentences[0].trim();
+      if (first.length >= 5) {
+        final repeatCount = sentences.where((s) => s.trim() == first).length;
+        if (repeatCount >= 3) return true;
+      }
+    }
+
+    // 短いフレーズの連続繰り返しチェック（句読点なしのケース）
+    // 例: 「ペンダント音ペンダント音ペンダント音」
+    for (int len = 3; len <= 15 && len <= text.length ~/ 3; len++) {
+      final pattern = text.substring(0, len);
+      int count = 0;
+      int pos = 0;
+      while (pos + len <= text.length) {
+        if (text.substring(pos, pos + len) == pattern) {
+          count++;
+          pos += len;
+        } else {
+          break;
+        }
+      }
+      if (count >= 3) return true;
     }
 
     return false;

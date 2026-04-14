@@ -195,7 +195,13 @@ class AisaOfflineSyncService {
         totalApiCalls++;
 
         if (transcript != null && transcript.trim().isNotEmpty) {
-          sessionTranscripts.add(transcript.trim());
+          // ハルシネーションチェック（オフライン同期でもフィルタリング）
+          if (!AisaTranscriptionService.isHallucination(transcript.trim())) {
+            sessionTranscripts.add(transcript.trim());
+          } else {
+            debugPrint('[AISA Offline] ハルシネーション検出 → 破棄');
+            skipCount++;
+          }
         }
 
         // 次のバッチまで5秒待機（レート制限回避）
