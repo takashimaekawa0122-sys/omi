@@ -83,170 +83,208 @@ class AisaOfflineSyncService {
       debugPrint('[AISA Offline] WAL一括マーク失敗（続行）: $e');
     }
 
-    // Groq Whisperで文字起こし（synced済みマーク後なのでOmiには送られない）
-    // Groqレート制限: free tier 20 req/min → 最低5秒間隔で送信
-    //
-    // 【設計方針】セッション単位で処理することで2つのバグを防ぐ：
-    //   Bug1: diskWalsは時系列順とは限らないため、先にセッション分割（内部でtimerStart昇順ソート済み）
-    //   Bug2: previousTranscriptがセッション境界をまたがないようセッション毎にリセット
-    int successCount = 0;
-    int skipCount = 0;
-    int failCount = 0;
-    final Map<String, String> walTranscripts = {}; // walId → transcript
+    // 【バッチ処理】複数チャンクのWAVを結合して1回のAPI呼び出しで処理
+    // 旧: 60チャンク × 5秒待機 = 5分以上
+    // 新: 6バッチ × 5秒待機 = 30秒程度（10倍高速化）
+    const batchSize = 10; // 最大10チャンク（約10分）を1つのWAVに結合
 
     // セッション分割（内部でtimerStart昇順ソート → 時系列順が保証される）
     final sessions = _groupWalsBySession(diskWals);
-
-    int processedCount = 0; // 全チャンクを通じたカウンター（レート制限タイミング用）
+    int savedSessions = 0;
+    int totalApiCalls = 0;
+    int skipCount = 0;
 
     for (final sessionWals in sessions) {
-      // セッションをまたぐ文脈の汚染を防ぐため、セッション毎にリセット
-      String? previousTranscript;
+      if (_isCancelled) break;
 
-      for (final wal in sessionWals) {
-        // キャンセルチェック（手動同期開始時などに中断）
-        if (_isCancelled) {
-          debugPrint('[AISA Offline] キャンセルにより中断（処理済み: $processedCount/${diskWals.length}）');
-          break;
-        }
+      final sessionTranscripts = <String>[];
 
-        try {
-          final transcript = await _transcribeWalOnly(wal, previousContext: previousTranscript);
-          if (transcript == null) {
-            skipCount++; // 無音またはデコード失敗
-            previousTranscript = null; // 無音は文脈をリセット（話題の区切りの可能性）
-          } else if (transcript.trim().isNotEmpty) {
-            walTranscripts[wal.id] = transcript.trim();
-            successCount++;
-            previousTranscript = transcript.trim(); // 次のチャンクへ文脈を引き継ぐ
+      // セッション内チャンクをバッチに分割
+      for (int batchStart = 0; batchStart < sessionWals.length; batchStart += batchSize) {
+        if (_isCancelled) break;
+
+        final batchEnd = (batchStart + batchSize).clamp(0, sessionWals.length);
+        final batch = sessionWals.sublist(batchStart, batchEnd);
+
+        // バッチ内の全チャンクをWAVに変換してVADチェック
+        final validWavBytes = <List<int>>[];
+        final tempFiles = <File>[];
+
+        for (final wal in batch) {
+          try {
+            final fullPath = await Wal.getFilePath(wal.filePath);
+            if (fullPath == null) continue;
+            final file = File(fullPath);
+            if (!await file.exists()) continue;
+
+            final frames = await _readFrames(file);
+            if (frames.isEmpty) continue;
+
+            final wavUtil = WavBytesUtil(
+              codec: wal.codec,
+              framesPerSecond: wal.codec.getFramesPerSecond(),
+            );
+            final wavFile = await wavUtil.createWavByCodec(
+              frames,
+              filename: 'aisa_offline_${wal.id}.wav',
+            );
+            tempFiles.add(wavFile);
+
+            final wavBytes = await wavFile.readAsBytes();
+            final rms = _calcRms(wavBytes);
+            if (rms <= 200) {
+              skipCount++;
+              continue; // 環境音スキップ
+            }
+
+            // WAVデータ部分のみ抽出（ヘッダー44バイトを除く）
+            if (wavBytes.length > 44) {
+              validWavBytes.add(wavBytes.sublist(44));
+            }
+          } catch (e) {
+            debugPrint('[AISA Offline] WALデコード失敗: $e');
           }
-        } catch (e) {
-          debugPrint('[AISA Offline] WAL文字起こし失敗 ${wal.id}: $e');
-          AisaDebugLogger.instance.error('❌ [Offline] WAL失敗 ${wal.id}: $e');
-          failCount++;
-          // 失敗時はpreviousTranscriptをそのまま維持（直前の成功チャンクの文脈を保持）
         }
 
-        processedCount++;
-        // 最後のチャンク以外は5秒待機してレート制限を回避
-        if (processedCount < diskWals.length && !_isCancelled) {
+        // 一時ファイルを削除
+        for (final f in tempFiles) {
+          try { await f.delete(); } catch (_) {}
+        }
+
+        if (validWavBytes.isEmpty) continue;
+
+        // 有効なWAVデータを1つのWAVファイルに結合
+        final combinedWav = _combineWavData(validWavBytes);
+        if (combinedWav == null) continue;
+
+        // 結合ファイルサイズチェック（25MB制限）
+        if (combinedWav.length > 24 * 1024 * 1024) {
+          debugPrint('[AISA Offline] 結合WAVが大きすぎてスキップ (${(combinedWav.length / 1024 / 1024).toStringAsFixed(1)}MB)');
+          continue;
+        }
+
+        // 結合WAVをGroq Whisperで文字起こし
+        final combinedFile = await _writeTempWav(combinedWav, 'aisa_batch_${batch.first.id}.wav');
+
+        const maxRetries = 2;
+        String? transcript;
+        for (int attempt = 0; attempt <= maxRetries; attempt++) {
+          try {
+            transcript = await AisaTranscriptionService.instance.transcribeOnly(
+              combinedFile,
+              previousContext: sessionTranscripts.isNotEmpty ? sessionTranscripts.last : null,
+            );
+            break;
+          } catch (e) {
+            final isRateLimit = e.toString().contains('429');
+            final waitSecs = isRateLimit ? 60 : 10 * (attempt + 1);
+            if (attempt < maxRetries) {
+              await Future.delayed(Duration(seconds: waitSecs));
+            }
+          }
+        }
+
+        try { await combinedFile.delete(); } catch (_) {}
+        totalApiCalls++;
+
+        if (transcript != null && transcript.trim().isNotEmpty) {
+          sessionTranscripts.add(transcript.trim());
+        }
+
+        // 次のバッチまで5秒待機（レート制限回避）
+        if (batchStart + batchSize < sessionWals.length && !_isCancelled) {
           await Future.delayed(const Duration(seconds: 5));
         }
       }
 
-      if (_isCancelled) break;
-    }
+      // セッションの全バッチ結果を結合して保存
+      if (sessionTranscripts.isEmpty) continue;
 
-    // 同一録音セッションのチャンクを結合して1件の会話として保存
-    // キャンセル済みでも収集済みのテキストは保存する（途中までの内容を失わないため）
-    int savedSessions = 0;
-    for (final sessionWals in sessions) {
-      final transcripts = sessionWals
-          .map((w) => walTranscripts[w.id])
-          .where((t) => t != null && t!.isNotEmpty)
-          .cast<String>()
-          .toList();
-
-      if (transcripts.isEmpty) continue;
-
-      final combined = transcripts.join(' ');
-      // dispose()後にstreamへの追加を試みると例外が発生するためガードする
+      final combined = sessionTranscripts.join(' ');
       try {
         if (!_transcriptController.isClosed) {
           _transcriptController.add(combined);
         }
-      } catch (_) {
-        // dispose()直後のタイミングで発生しうるレースコンディションを無視
-      }
+      } catch (_) {}
       await AisaFirestoreService.instance.saveTranscript(combined);
       savedSessions++;
-      debugPrint('[AISA Offline] ${sessionWals.length}チャンクを1件の会話として保存 '
-          '(${combined.length}文字, ${sessionWals.first.timerStart})'
-          '${_isCancelled ? " [キャンセル後の残存データ]" : ""}');
+      debugPrint('[AISA Offline] セッション保存 (${combined.length}文字)');
     }
 
-    debugPrint('[AISA Offline] ${diskWals.length}チャンク処理完了 → $savedSessions件の会話として保存 '
-        '(成功: $successCount, スキップ: $skipCount, 失敗: $failCount)');
+    debugPrint('[AISA Offline] ${diskWals.length}チャンク → $savedSessions件保存 '
+        '(API呼出=$totalApiCalls, スキップ=$skipCount)');
     AisaDebugLogger.instance.info(
-        '[Offline] 完了: $savedSessions件保存 (成功=$successCount スキップ=$skipCount 失敗=$failCount)');
+        '[Offline] 完了: $savedSessions件保存 (API=$totalApiCalls スキップ=$skipCount)');
     _isSyncing = false;
   }
 
-  /// WAL 1件を文字起こしのみ（Firestoreには保存しない）
-  /// [previousContext]: 直前チャンクの末尾テキスト（Whisperプロンプトへの文脈提供用）
-  /// 複数チャンクを結合して1件として保存するため、保存は呼び出し元に任せる
-  /// 失敗時は最大2回リトライする（タイムアウト・ネットワークエラー対策）
-  Future<String?> _transcribeWalOnly(Wal wal, {String? previousContext}) async {
-    final fullPath = await Wal.getFilePath(wal.filePath);
-    if (fullPath == null) return null;
+  /// 複数チャンクのPCMデータを1つのWAVファイルに結合
+  Uint8List? _combineWavData(List<List<int>> pcmDataList) {
+    if (pcmDataList.isEmpty) return null;
 
-    final file = File(fullPath);
-    if (!await file.exists()) return null;
-
-    // .binファイルからOpusフレームを読み出す
-    final frames = await _readFrames(file);
-    if (frames.isEmpty) {
-      debugPrint('[AISA] チャンク ${wal.id}: フレームなし → スキップ');
-      return null;
+    int totalDataSize = 0;
+    for (final data in pcmDataList) {
+      totalDataSize += data.length;
     }
 
-    // OpusフレームをWAVに変換
-    // wal.idでファイル名を一意にする（timerStartは同一になりうるため）
-    final wavUtil = WavBytesUtil(
-      codec: wal.codec,
-      framesPerSecond: wal.codec.getFramesPerSecond(),
-    );
-    final wavFile = await wavUtil.createWavByCodec(
-      frames,
-      filename: 'aisa_offline_${wal.id}.wav',
-    );
+    // WAVヘッダー（44バイト）+ PCMデータ
+    const sampleRate = 16000;
+    const channels = 1;
+    const bitsPerSample = 16;
+    final byteRate = sampleRate * channels * bitsPerSample ~/ 8;
+    final blockAlign = channels * bitsPerSample ~/ 8;
 
-    // VADチェック：環境音をスキップして同期時間を短縮
-    // 閾値200: エアコン・冷蔵庫・遠くのTV等の環境音をスキップし、
-    //          明確な人の声（通常RMS 300〜数千）のみ処理する
-    final wavBytes = await wavFile.readAsBytes();
-    final rms = _calcRms(wavBytes);
-    if (rms <= 200) {
-      debugPrint('[AISA] チャンク ${wal.id}: VADスキップ (RMS=$rms ≤ 200)');
-      await wavFile.delete();
-      return null;
-    }
+    final buffer = ByteData(44 + totalDataSize);
 
-    // ファイルサイズ確認（Groq Whisperは25MB制限）
-    final wavSize = wavBytes.length;
-    if (wavSize > 24 * 1024 * 1024) {
-      debugPrint('[AISA] チャンク ${wal.id}: WAVが大きすぎてスキップ '
-          '(${(wavSize / 1024 / 1024).toStringAsFixed(1)}MB)');
-      await wavFile.delete();
-      return null;
-    }
+    // RIFF header
+    buffer.setUint8(0, 0x52); // R
+    buffer.setUint8(1, 0x49); // I
+    buffer.setUint8(2, 0x46); // F
+    buffer.setUint8(3, 0x46); // F
+    buffer.setUint32(4, 36 + totalDataSize, Endian.little);
+    buffer.setUint8(8, 0x57);  // W
+    buffer.setUint8(9, 0x41);  // A
+    buffer.setUint8(10, 0x56); // V
+    buffer.setUint8(11, 0x45); // E
 
-    // Groq Whisper 文字起こし（最大2回リトライ）
-    // タイムアウト・ネットワークエラー・レートリミットに対応
-    const maxRetries = 2;
-    for (int attempt = 0; attempt <= maxRetries; attempt++) {
-      try {
-        final transcript = await AisaTranscriptionService.instance.transcribeOnly(wavFile, previousContext: previousContext);
-        // 成功: WAVを削除して返す
-        try { await wavFile.delete(); } catch (_) {}
-        return transcript;
-      } catch (e) {
-        final isRateLimit = e.toString().contains('429');
-        final waitSecs = isRateLimit ? 60 : 10 * (attempt + 1); // レートリミットは60秒待機
+    // fmt chunk
+    buffer.setUint8(12, 0x66); // f
+    buffer.setUint8(13, 0x6D); // m
+    buffer.setUint8(14, 0x74); // t
+    buffer.setUint8(15, 0x20); // (space)
+    buffer.setUint32(16, 16, Endian.little); // chunk size
+    buffer.setUint16(20, 1, Endian.little);  // PCM format
+    buffer.setUint16(22, channels, Endian.little);
+    buffer.setUint32(24, sampleRate, Endian.little);
+    buffer.setUint32(28, byteRate, Endian.little);
+    buffer.setUint16(32, blockAlign, Endian.little);
+    buffer.setUint16(34, bitsPerSample, Endian.little);
 
-        if (attempt < maxRetries) {
-          debugPrint('[AISA] チャンク ${wal.id}: 文字起こし失敗 '
-              '(試行 ${attempt + 1}/$maxRetries, ${waitSecs}s後リトライ): $e');
-          await Future.delayed(Duration(seconds: waitSecs));
-        } else {
-          debugPrint('[AISA] チャンク ${wal.id}: 全試行失敗 → スキップ: $e');
-        }
+    // data chunk
+    buffer.setUint8(36, 0x64); // d
+    buffer.setUint8(37, 0x61); // a
+    buffer.setUint8(38, 0x74); // t
+    buffer.setUint8(39, 0x61); // a
+    buffer.setUint32(40, totalDataSize, Endian.little);
+
+    // PCMデータを書き込み
+    int offset = 44;
+    for (final data in pcmDataList) {
+      for (int i = 0; i < data.length; i++) {
+        buffer.setUint8(offset + i, data[i]);
       }
+      offset += data.length;
     }
 
-    // 全リトライ失敗: WAVを削除してnullを返す
-    try { await wavFile.delete(); } catch (_) {}
-    return null;
+    return buffer.buffer.asUint8List();
+  }
+
+  /// 一時WAVファイルを書き出す
+  Future<File> _writeTempWav(Uint8List wavData, String filename) async {
+    final dir = await Directory.systemTemp.createTemp('aisa_batch');
+    final file = File('${dir.path}/$filename');
+    await file.writeAsBytes(wavData);
+    return file;
   }
 
   /// WAVバイト列のRMS値を計算（VADチェック用）
