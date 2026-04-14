@@ -224,10 +224,33 @@ class AisaOfflineSyncService {
       debugPrint('[AISA Offline] セッション保存 (${combined.length}文字)');
     }
 
+    // 同期完了後、処理済み.binファイルを自動削除（ストレージ節約＆再起動時の高速化）
+    int deletedFiles = 0;
+    for (final wal in diskWals) {
+      try {
+        final fullPath = await Wal.getFilePath(wal.filePath);
+        if (fullPath != null) {
+          final file = File(fullPath);
+          if (await file.exists()) {
+            await file.delete();
+            deletedFiles++;
+          }
+        }
+      } catch (e) {
+        debugPrint('[AISA Offline] .bin削除失敗: $e');
+      }
+    }
+    // WALリストからも除去して永続化
+    try {
+      await phoneSync.deleteAllSyncedWals();
+    } catch (e) {
+      debugPrint('[AISA Offline] WALリストクリーンアップ失敗: $e');
+    }
+
     debugPrint('[AISA Offline] ${diskWals.length}チャンク → $savedSessions件保存 '
-        '(API呼出=$totalApiCalls, スキップ=$skipCount)');
+        '(API呼出=$totalApiCalls, スキップ=$skipCount, 削除=$deletedFiles)');
     AisaDebugLogger.instance.info(
-        '[Offline] 完了: $savedSessions件保存 (API=$totalApiCalls スキップ=$skipCount)');
+        '[Offline] 完了: $savedSessions件保存 (API=$totalApiCalls スキップ=$skipCount 削除=$deletedFiles)');
     _isSyncing = false;
   }
 
