@@ -84,7 +84,9 @@ class AppReviewService {
   }
 
   // Shows the review prompt if conditions are met
+  // [A.I.S.A.] レビューダイアログを完全無効化
   Future<bool> showReviewPromptIfNeeded(BuildContext context, {bool isProcessingFirstConversation = false}) async {
+    return false;
     final hasCompleted = await hasCompletedFirstActionItem();
     final isFirst = await isFirstConversation();
 
