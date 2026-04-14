@@ -55,15 +55,28 @@ class AisaChatBubbleWidget extends StatelessWidget {
       child: Column(
         crossAxisAlignment: alignment,
         children: [
+          // 話者名ラベル
+          Padding(
+            padding: EdgeInsets.only(
+              left: isSelf ? 0 : 32,
+              right: isSelf ? 32 : 0,
+              bottom: 2,
+            ),
+            child: Text(
+              isSelf ? '自分' : (msg.speaker == '相手' ? '不明' : msg.speaker),
+              style: TextStyle(
+                color: Colors.white38,
+                fontSize: 11,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
           Row(
             mainAxisAlignment: isSelf ? MainAxisAlignment.end : MainAxisAlignment.start,
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
               if (!isSelf) ...[
-                Text(
-                  '👤',
-                  style: const TextStyle(fontSize: 20),
-                ),
+                const Text('👤', style: TextStyle(fontSize: 20)),
                 const SizedBox(width: 6),
               ],
               Flexible(
@@ -78,39 +91,19 @@ class AisaChatBubbleWidget extends StatelessWidget {
                       bottomRight: Radius.circular(isSelf ? 4 : 16),
                     ),
                   ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      if (!isSelf && msg.speaker != '相手')
-                        Padding(
-                          padding: const EdgeInsets.only(bottom: 2),
-                          child: Text(
-                            msg.speaker,
-                            style: const TextStyle(
-                              color: Colors.white70,
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ),
-                      Text(
-                        msg.text,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 15,
-                          height: 1.4,
-                        ),
-                      ),
-                    ],
+                  child: Text(
+                    msg.text,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 15,
+                      height: 1.4,
+                    ),
                   ),
                 ),
               ),
               if (isSelf) ...[
                 const SizedBox(width: 6),
-                Text(
-                  '🎙️',
-                  style: const TextStyle(fontSize: 20),
-                ),
+                const Text('🎙️', style: TextStyle(fontSize: 20)),
               ],
             ],
           ),
