@@ -84,9 +84,8 @@ class AisaOfflineSyncService {
     }
 
     // 【バッチ処理】複数チャンクのWAVを結合して1回のAPI呼び出しで処理
-    // 旧: 60チャンク × 5秒待機 = 5分以上
-    // 新: 6バッチ × 5秒待機 = 30秒程度（10倍高速化）
-    const batchSize = 10; // 最大10チャンク（約10分）を1つのWAVに結合
+    // Groq free tier: 20 req/min → 8秒間隔で安全マージン確保
+    const batchSize = 20; // 最大20チャンク（約20分）を1つのWAVに結合
 
     // セッション分割（内部でtimerStart昇順ソート → 時系列順が保証される）
     final sessions = _groupWalsBySession(diskWals);
@@ -132,9 +131,9 @@ class AisaOfflineSyncService {
 
             final wavBytes = await wavFile.readAsBytes();
             final rms = _calcRms(wavBytes);
-            if (rms <= 200) {
+            if (rms <= 500) {
               skipCount++;
-              continue; // 環境音スキップ
+              continue; // 環境音・小さな物音をスキップ（人の声は通常RMS 500以上）
             }
 
             // WAVデータ部分のみ抽出（ヘッダー44バイトを除く）
@@ -193,7 +192,7 @@ class AisaOfflineSyncService {
 
         // 次のバッチまで5秒待機（レート制限回避）
         if (batchStart + batchSize < sessionWals.length && !_isCancelled) {
-          await Future.delayed(const Duration(seconds: 5));
+          await Future.delayed(const Duration(seconds: 8));
         }
       }
 
