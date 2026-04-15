@@ -33,7 +33,7 @@ class AisaSummaryService {
 
       // エントリ数が変わっていなければスキップ
       if (entries.length == _lastEntryCount) {
-        debugPrint('[AISA Summary] エントリ数変化なし ($entries.length) → スキップ');
+        debugPrint('[AISA Summary] エントリ数変化なし (${entries.length}) → スキップ');
         return null;
       }
 

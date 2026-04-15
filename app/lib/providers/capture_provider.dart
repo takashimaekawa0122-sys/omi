@@ -1418,7 +1418,7 @@ class CaptureProvider extends ChangeNotifier
                   (_aisaAccumulatedText.length - 200).clamp(0, _aisaAccumulatedText.length))
               : null,
         );
-        wavFile = null; // transcribeChunkOnlyは内部でファイルを削除しないため、finallyで削除
+        // wavFileはfinallyブロックで削除する（nullにするとfinallyが削除しなくなるため代入しない）
 
         if (chunk != null && chunk.trim().isNotEmpty) {
           // クリーンなテキストを蓄積

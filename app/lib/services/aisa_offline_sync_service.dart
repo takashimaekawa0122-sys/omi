@@ -49,12 +49,22 @@ class AisaOfflineSyncService {
     _isCancelled = false;
     _isSyncing = true;
 
+    try {
+      await _syncPendingWalsInternal(pendingWals, phoneSync);
+    } finally {
+      _isSyncing = false; // 例外が発生しても必ずリセット
+    }
+  }
+
+  Future<void> _syncPendingWalsInternal(
+    List<Wal> pendingWals,
+    LocalWalSyncImpl phoneSync,
+  ) async {
     // APIキー未設定の早期検出
     const groqApiKey = String.fromEnvironment('GROQ_API_KEY');
     if (groqApiKey.isEmpty) {
       debugPrint('[AISA Offline] GROQ_API_KEY未設定のためオフライン同期をスキップ');
       AisaDebugLogger.instance.error('❌ [Offline] GROQ_API_KEY未設定 - オフライン同期不可');
-      _isSyncing = false;
       return;
     }
 
@@ -63,7 +73,6 @@ class AisaOfflineSyncService {
         .toList();
 
     if (diskWals.isEmpty) {
-      _isSyncing = false;
       return;
     }
 
@@ -251,7 +260,6 @@ class AisaOfflineSyncService {
         '(API呼出=$totalApiCalls, スキップ=$skipCount, 削除=$deletedFiles)');
     AisaDebugLogger.instance.info(
         '[Offline] 完了: $savedSessions件保存 (API=$totalApiCalls スキップ=$skipCount 削除=$deletedFiles)');
-    _isSyncing = false;
   }
 
   /// 複数チャンクのPCMデータを1つのWAVファイルに結合
