@@ -270,8 +270,8 @@ class WalSyncs implements IWalSync {
     }
 
     // AISA Phase: SDカード/FlashPageからダウンロード済みのWALをGroq Whisperで文字起こし
-    // Phase 2（Omiクラウド送信）の前に実行しないと、syncedになった後では対象WALが見つからない
-    Logger.debug("WalSyncs: AISA Phase - Transcribing downloaded WALs before cloud upload");
+    // バックグラウンド実行: syncPendingWals内でWALをsynced即時マークするためPhase 2と競合しない
+    Logger.debug("WalSyncs: AISA Phase - Transcribing downloaded WALs in background");
     DebugLogManager.logInfo('AISA Phase: Transcribing downloaded WALs');
     try {
       final allMissing = await _phoneSync.getMissingWals();
@@ -280,10 +280,12 @@ class WalSyncs implements IWalSync {
           .toList();
       AisaDebugLogger.instance.info('[Sync] AISA Phase: 未処理WAL ${diskMissWals.length}件');
       if (diskMissWals.isNotEmpty && !AisaOfflineSyncService.instance.isSyncing) {
-        Logger.debug("WalSyncs: AISA - ${diskMissWals.length}件のWALを文字起こし");
-        AisaDebugLogger.instance.info('[Sync] AISA Phase: Groq文字起こし開始');
-        await AisaOfflineSyncService.instance.syncPendingWals(diskMissWals, _phoneSync);
-        AisaDebugLogger.instance.info('[Sync] AISA Phase: Groq文字起こし完了');
+        Logger.debug("WalSyncs: AISA - ${diskMissWals.length}件のWALをバックグラウンドで文字起こし開始");
+        AisaDebugLogger.instance.info('[Sync] AISA Phase: Groq文字起こしをバックグラウンドで開始 (${diskMissWals.length}件)');
+        // バックグラウンド実行: syncPendingWals内で最初にWALをsyncedマークするため
+        // Phase 2（Omiクラウド送信）と競合しない。Groq処理は同期完了後も継続する。
+        // ignore: unawaited_futures
+        AisaOfflineSyncService.instance.syncPendingWals(diskMissWals, _phoneSync);
       } else if (AisaOfflineSyncService.instance.isSyncing) {
         Logger.debug("WalSyncs: AISA - 既に文字起こし実行中のためスキップ");
         AisaDebugLogger.instance.info('[Sync] AISA Phase: 既に実行中のためスキップ');
