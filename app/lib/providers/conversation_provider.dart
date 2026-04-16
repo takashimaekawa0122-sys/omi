@@ -54,6 +54,12 @@ class ConversationProvider extends ChangeNotifier {
   // [A.I.S.A.] Firestoreからの会話復元が完了したかどうか
   bool _aisaFirestoreLoaded = false;
 
+  // [A.I.S.A.] mergeAisaConversationsの並列実行防止（重複追加バグ対策）
+  // 複数の呼び出し元（constructor, fetchConversations, getInitialConversations,
+  // home/page.dart, conversations_page.dart）が並列に走ると、existingIdsの
+  // キャッシュが古く、同じFirestoreエントリが重複追加される競合状態が起きる。
+  Future<void>? _mergeAisaInFlight;
+
   ConversationProvider() {
     _setupMergeListener();
     _loadSettings();
@@ -400,7 +406,23 @@ class ConversationProvider extends ChangeNotifier {
   /// [A.I.S.A.] FirestoreからAISA会話を読み込んでconversationsリストにマージし、
   /// 新しい順にソートしてUIを更新する。
   /// publicメソッド: home/page.dart, conversations_page.dart から直接呼ばれる
+  ///
+  /// 並列実行防止: 既に実行中のFutureがあれば同じFutureを返す（重複追加防止）
   Future<void> mergeAisaConversations() async {
+    // 実行中の処理があれば、それに相乗りする（新しい処理を開始しない）
+    if (_mergeAisaInFlight != null) {
+      debugPrint('[AISA merge] 既に実行中 → 実行中のFutureを待機');
+      return _mergeAisaInFlight!;
+    }
+    _mergeAisaInFlight = _mergeAisaConversationsInternal();
+    try {
+      await _mergeAisaInFlight!;
+    } finally {
+      _mergeAisaInFlight = null;
+    }
+  }
+
+  Future<void> _mergeAisaConversationsInternal() async {
     try {
       debugPrint('[AISA merge] ===== 開始 =====');
 
@@ -438,12 +460,17 @@ class ConversationProvider extends ChangeNotifier {
         if (existingIds.contains(id)) continue;
 
         // 内容が既存AISA会話と一致する場合はスキップ（リアルタイム追加分との重複防止）
-        final entryContentKey = entry.text.trim().substring(0, entry.text.trim().length.clamp(0, 100));
-        if (existingAisaContentKeys.contains(entryContentKey)) {
-          skippedDup++;
-          continue;
-        }
+        // 【重要】existingAisaContentKeysはパース後のbody（タイトル除く）なので、
+        // entry.textも同じパース処理を通してから比較キーを作る必要がある
         final parsed = _parseAisaTitleAndEmoji(entry.text, entry.timestamp);
+        final parsedBody = parsed.body.trim();
+        if (parsedBody.isNotEmpty) {
+          final entryContentKey = parsedBody.substring(0, parsedBody.length.clamp(0, 100));
+          if (existingAisaContentKeys.contains(entryContentKey)) {
+            skippedDup++;
+            continue;
+          }
+        }
         conversations.add(ServerConversation(
           id: id,
           createdAt: entry.timestamp,
