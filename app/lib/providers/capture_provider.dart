@@ -1504,10 +1504,11 @@ class CaptureProvider extends ChangeNotifier
     }
     if (count == 0) return false;
     final rms = sqrt(sumSquares / count);
-    // 閾値150: 100だと低音量TV・BGMを通してしまいWhisperハルシネーションを誘発する。
-    // ペンダントマイクで実際に話した声は近距離のため通常RMS 300〜2000。
-    // 150に引き上げても自声の取りこぼしはほぼ無く、環境音起因のハルシネーションを削減できる。
-    const threshold = 150.0;
+    // 閾値500: セグメントフィルタ（閾値800）との乖離を縮めてGroq APIの無駄呼び出しを削減。
+    // RMS 150〜500はVADを通過するがセグメントフィルタで破棄されていた（APIコストの無駄）。
+    // ペンダントマイクで実際に話した声は近距離のため通常RMS 1000〜10000。
+    // 500に引き上げても自声の取りこぼしはほぼ無く、環境音・遠方音起因のAPI呼び出しを大幅削減。
+    const threshold = 500.0;
     AisaDebugLogger.instance.info('VAD: RMS=${rms.toStringAsFixed(1)} (閾値=$threshold) → ${rms > threshold ? "通過" : "スキップ"}');
     return rms > threshold;
   }
