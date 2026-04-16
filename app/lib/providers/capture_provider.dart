@@ -131,6 +131,11 @@ class CaptureProvider extends ChangeNotifier
   static const int _aisaSilenceThreshold = 3; // 3ティック（15秒）無音で会話の区切りと判定
   static const int _aisaMaxBufferTicks = 36; // 最大36ティック（180秒=3分）でフラッシュ
   int _aisaBufferTicks = 0; // 現在のバッファ蓄積ティック数
+  // AISA: タイマーとライフサイクル呼び出しの再入防止フラグ
+  // Groq(2〜6秒) + Claude(3〜5秒) でティック処理が10秒以上かかることがあり、
+  // 5秒タイマーで並列実行されると同じ内容の会話が重複生成される可能性がある。
+  bool _aisaTranscribing = false;
+  bool _aisaFlushing = false;
   final List<List<int>> _aisaPendingFrames = []; // 蓄積中のフレーム
   String _aisaAccumulatedText = ''; // 蓄積中のテキスト（複数チャンクをまとめる）
 
@@ -1379,6 +1384,21 @@ class CaptureProvider extends ChangeNotifier
   /// 各ティック: Groq Whisperで文字起こし＋ハルシネーション除去（Claude無し）
   /// 無音15秒 or 3分経過: 蓄積テキストをまとめてClaude校正→Firestore保存→会話表示
   Future<void> _triggerAisaTranscription({bool forceFlush = false}) async {
+    // 再入防止: 前回の処理がまだGroq/Claude待機中なら新規実行しない
+    // (5秒タイマーとライフサイクルコールバックが並列に走る競合状態を防ぐ)
+    if (_aisaTranscribing) {
+      AisaDebugLogger.instance.info('⏸ 前回の処理がまだ実行中 → このティックはスキップ');
+      return;
+    }
+    _aisaTranscribing = true;
+    try {
+      await _triggerAisaTranscriptionInternal(forceFlush: forceFlush);
+    } finally {
+      _aisaTranscribing = false;
+    }
+  }
+
+  Future<void> _triggerAisaTranscriptionInternal({bool forceFlush = false}) async {
     if (_aisaFrameBuffer.isEmpty && !forceFlush) {
       // 新しいフレームなし
       if (_aisaAccumulatedText.isNotEmpty) {
@@ -1465,8 +1485,15 @@ class CaptureProvider extends ChangeNotifier
 
   /// 蓄積済みテキストをClaude校正→Firestore保存→会話リストに追加
   Future<void> _flushAisaText() async {
+    // 再入防止: 前回のフラッシュがまだ進行中なら重複実行しない
+    // (ライフサイクルforceFlushとタイマー同時発火による重複会話生成を防ぐ)
+    if (_aisaFlushing) {
+      AisaDebugLogger.instance.info('⏸ 前回のフラッシュがまだ実行中 → スキップ');
+      return;
+    }
     if (_aisaAccumulatedText.isEmpty) return;
 
+    _aisaFlushing = true;
     final rawText = _aisaAccumulatedText;
     _aisaAccumulatedText = '';
     _aisaSilentTicks = 0;
@@ -1487,6 +1514,8 @@ class CaptureProvider extends ChangeNotifier
       AisaDebugLogger.instance.error('❌ Claude校正/保存失敗: $e');
       // 失敗しても生テキストを表示する
       _addAisaConversation(rawText);
+    } finally {
+      _aisaFlushing = false;
     }
   }
 
