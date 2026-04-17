@@ -214,7 +214,9 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
       }
 
       await provider.initConversation();
-      if (provider.conversation.appResults.isEmpty) {
+      // A.I.S.A.会話は Omi バックエンドに存在しないため、appResults を埋めるための
+      // `getConversationById` 呼び出しをスキップする。HTTP リトライで画面が固まるのを回避。
+      if (provider.conversation.appResults.isEmpty && !isAisa) {
         final date = provider.selectedDate;
         final idx = conversationProvider.getConversationIndexById(provider.conversation.id, date);
         if (idx != -1) {
@@ -1384,14 +1386,37 @@ class _TranscriptWidgetsState extends State<TranscriptWidgets> with AutomaticKee
               // A.I.S.A.会話は transcriptSegments が空で structured.overview に本文が入る設計。
               // Omi公式の externalIntegration フォールバックでは拾えないため overview をフォールバック表示する。
               final isAisa = conversation.id.startsWith('aisa_');
-              final fallbackText = isAisa
+              final rawFallback = isAisa
                   ? conversation.structured.overview
                   : (provider.conversation.externalIntegration?.text ?? '');
+              // decodeString を try/catch でガード: 万一 extension が例外を透過させても build が死なないよう保険
+              String fallbackText;
+              try {
+                fallbackText = rawFallback.decodeString;
+              } catch (_) {
+                fallbackText = rawFallback;
+              }
+
+              // 本文が空の場合はプレースホルダを表示（ExpandableTextWidget は空文字で layout が無駄になる）
+              if (fallbackText.trim().isEmpty) {
+                return Padding(
+                  padding: const EdgeInsets.only(top: 32),
+                  child: Center(
+                    child: Text(
+                      isAisa ? '本文がまだありません' : 'No transcript available',
+                      style: TextStyle(color: Colors.grey.shade500, fontSize: 14),
+                    ),
+                  ),
+                );
+              }
+
               return Padding(
                 padding: const EdgeInsets.only(top: 32),
                 child: ExpandableTextWidget(
-                  text: fallbackText.decodeString,
-                  maxLines: 1000,
+                  text: fallbackText,
+                  // maxLines=1000 は TextPainter.layout が重くなるため 100 に抑える。
+                  // A.I.S.A. 本文は通常数十行なので 100 行あれば十分、長文は Show more で展開可能。
+                  maxLines: 100,
                   linkColor: Colors.grey.shade300,
                   style: TextStyle(color: Colors.grey.shade300, fontSize: 15, height: 1.3),
                   toggleExpand: () {

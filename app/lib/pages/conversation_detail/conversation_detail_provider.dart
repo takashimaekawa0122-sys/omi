@@ -70,6 +70,8 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
     }
 
     result ??= _cachedConversation;
+
+    // 厳密な年月日一致が取れたらそれを返す（従来の最良ケース）
     if (result != null &&
         result.createdAt.year == selectedDate.year &&
         result.createdAt.month == selectedDate.month &&
@@ -77,6 +79,17 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
       return _cachedConversation = result;
     }
 
+    // 日付不一致でもキャッシュを落とさない。
+    // 旧実装では StateError を投げていたが、これが Consumer のビルド中に発生すると
+    // 画面全体が黒くなって再ビルドループに陥り、アプリが固まる事象があった
+    // （特に A.I.S.A. の会話で selectedDate と createdAt のタイムゾーン差が絡むケース）。
+    // 安全のため、キャッシュ or リスト先頭があればそれを返す。
+    if (result != null) {
+      return _cachedConversation = result;
+    }
+    if (_cachedConversation != null) {
+      return _cachedConversation!;
+    }
     throw StateError("No valid conversation found");
   }
 
@@ -218,7 +231,24 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
     notifyListeners();
   }
 
+  /// A.I.S.A.独自の会話ID（`aisa_...`）は Omi 公式バックエンドに存在しないため、
+  /// Summary rating / getConversationById 等の HTTP リクエストをスキップする。
+  /// これを怠ると AISA 会話詳細を開いた瞬間にバックエンド問い合わせがハングし、
+  /// 画面が黒いまま固まる現象が発生する。
+  bool get _isAisaConversation {
+    try {
+      return conversation.id.startsWith('aisa_');
+    } catch (_) {
+      return false;
+    }
+  }
+
   void setConversationRating(int value) {
+    if (_isAisaConversation) {
+      hasConversationSummaryRatingSet = true;
+      setShowRatingUi(false);
+      return;
+    }
     setConversationSummaryRating(conversation.id, value);
     hasConversationSummaryRatingSet = true;
     setShowRatingUi(false);
@@ -242,7 +272,10 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
       print('titleFocusNode focus changed');
       if (!titleFocusNode!.hasFocus) {
         conversation.structured.title = titleController!.text;
-        updateConversationTitle(conversation.id, titleController!.text);
+        // A.I.S.A.会話は Omi バックエンドに存在しないため PATCH をスキップ
+        if (!_isAisaConversation) {
+          updateConversationTitle(conversation.id, titleController!.text);
+        }
       }
     });
 
@@ -257,7 +290,7 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
       precacheConversationAudio(conversation.id);
     }
 
-    if (!conversation.discarded) {
+    if (!conversation.discarded && !_isAisaConversation) {
       getHasConversationSummaryRating(conversation.id).then((value) {
         if (_isDisposed) return;
         hasConversationSummaryRatingSet = value;
@@ -271,6 +304,9 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
           });
         }
       });
+    } else if (_isAisaConversation) {
+      // A.I.S.A.はRatingを送信しないため、UIを出さずフラグだけ立てておく
+      hasConversationSummaryRatingSet = true;
     }
 
     // updateLoadingState(false);
@@ -512,6 +548,8 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
   }
 
   Future<void> refreshConversation() async {
+    // A.I.S.A.会話は Omi バックエンドに存在しないため HTTP 取得をスキップ
+    if (_isAisaConversation) return;
     try {
       final updatedConversation = await getConversationById(conversation.id);
       if (_isDisposed) return;
