@@ -424,9 +424,45 @@ class AisaTranscriptionService {
         continue;
       }
 
+      // 【最重要: Whisper JPモデルの「はい」系ハルシネーション対策】
+      // ユーザー報告「『はい』と言っていないのに文字起こしされる」への対応。
+      // Whisper JP は無音/雑音から「はい」「ええ」「うん」を極めて高頻度で生成する。
+      // これらの定型相槌は validShortReplies で素通りしていたため別枠で超厳格判定する。
+      //
+      // 必須条件（いずれか1つでも満たさなければハルシネーション扱い）:
+      //   - no_speech_prob < 0.15（＝ほぼ間違いなく発話している）
+      //   - avg_logprob    > -0.3（＝高品質な推論）
+      //   - RMS            ≥ 200（＝実際に音が出ていた。囁き未満を除外）
+      const ultraHallucinationPhrases = {
+        'はい', 'はいはい', 'はいはいはい', 'ええ', 'うん', 'いえ', 'ああ', 'おお',
+      };
+      final normalizedText = text.replaceAll(RegExp(r'[。、！？.!?\s]'), '');
+      if (ultraHallucinationPhrases.contains(normalizedText)) {
+        if (noSpeechProb >= 0.15) {
+          debugPrint('[AISA VAD] 除外(超短文相槌 no_speech=$noSpeechProb): "$text"');
+          skippedNoSpeech++;
+          continue;
+        }
+        if (avgLogprob < -0.3) {
+          debugPrint('[AISA VAD] 除外(超短文相槌 logprob=$avgLogprob): "$text"');
+          skippedLowConf++;
+          continue;
+        }
+        if (pcmData != null) {
+          final segStart = (seg['start'] as num?)?.toDouble() ?? 0.0;
+          final segEnd = (seg['end'] as num?)?.toDouble() ?? 0.0;
+          final rmsForUltra = _calculateSegmentRms(pcmData, sampleRate, segStart, segEnd);
+          if (rmsForUltra >= 0 && rmsForUltra < 200) {
+            debugPrint('[AISA VAD] 除外(超短文相槌 quiet rms=$rmsForUltra): "$text"');
+            skippedQuiet++;
+            continue;
+          }
+        }
+      }
+
       // 【短文の信頼度厳格化】犬の鳴き声・環境音をWhisperが短い日本語に誤変換するパターン対策
       // 2〜3文字の短いセグメントは通常より厳しい閾値を適用する
-      final textLen = text.replaceAll(RegExp(r'[。、！？.!?\s]'), '').length;
+      final textLen = normalizedText.length;
       if (textLen <= 3) {
         // 短い発話は no_speech_prob を半分の閾値で判定（0.6→0.3）
         // かつ avg_logprob も厳しく（-1.0→-0.5）
@@ -442,13 +478,12 @@ class AisaTranscriptionService {
         }
       }
 
-      // 【連続重複検出】同じ短文が3回連続する場合は2回目以降をスキップ
-      // 「はいはいはい」「ありがとうございましたありがとうございました」等の
-      // Whisperハルシネーションパターンを段階的に除去する
-      final normalizedText = text.replaceAll(RegExp(r'[。、！？.!?\s]'), '');
+      // 【連続重複検出】同じ短文が2回連続する時点で2回目を除外
+      // 「はいはい」「ありがとうございました」の連発はほぼ確実にハルシネーション。
+      // 旧実装（3回連続で発動）では「はい / はい」の2連発が素通りしていた。
       if (lastKeptText == normalizedText && normalizedText.length <= 15) {
         consecutiveSameCount++;
-        if (consecutiveSameCount >= 2) {
+        if (consecutiveSameCount >= 1) {
           debugPrint('[AISA VAD] 除外(重複${consecutiveSameCount + 1}回目): "$text"');
           skippedNoSpeech++;
           continue;
@@ -964,11 +999,12 @@ class AisaTranscriptionService {
 ・正しい可能性があるものは修正しない（迷ったら元のままにする）
 
 【重複統合ルール（重要）】
-・同じフレーズが連続または近接して3回以上繰り返される場合は1つにまとめる（Whisperハルシネーションの典型パターン）
+・同じフレーズが連続または近接して2回以上繰り返される場合は1つにまとめる（Whisperハルシネーションの典型パターン）
 ・「ありがとうございました」「はい」「そうですね」等の短い相槌が不自然に連続する場合は削除または1回に集約
 ・話者タグが異なっても内容が完全に同じ繰り返しは1つに集約
 ・F0マーカーの値が多少違っても、同一人物の同一発話が繰り返されている場合は統合する
-・「はい」が3回以上連続する場合は、会話の文脈に必然性がなければ全て削除する（Whisperが無音から生成するノイズパターン）
+・「はい」が2回以上連続する場合は、会話の文脈に必然性がなければ全て削除する（Whisperが無音から生成するノイズパターン）
+・「はい」「ええ」「うん」が単発で前後に会話文脈なく現れる場合も削除する（Whisperは無音/雑音から最も頻繁にこれらを生成する）
 ・「ありがとうございました」が文脈なく単発で現れる場合は削除（ビデオ終了時のハルシネーション）
 
 【動物の鳴き声・環境音の削除】
