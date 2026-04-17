@@ -32,10 +32,20 @@ class AisaTranscriptionService {
   }
 
   /// オフライン同期側で使用: ライブが静かになるまで待機（最大waitLimit秒）
+  /// タイムアウト到達時は警告ログを出して呼び出し元に制御を返す（オフラインを永久停止させない）
   Future<void> waitForLiveQuiet({Duration waitLimit = _liveWaitDefaultLimit}) async {
-    final deadline = DateTime.now().add(waitLimit);
+    if (!isLiveActive) return;
+    final startedAt = DateTime.now();
+    final deadline = startedAt.add(waitLimit);
     while (isLiveActive && DateTime.now().isBefore(deadline)) {
       await Future.delayed(_liveWaitPollInterval);
+    }
+    final waited = DateTime.now().difference(startedAt);
+    if (isLiveActive) {
+      AisaDebugLogger.instance.warning(
+          '⚠ ライブ待機タイムアウト(${waited.inSeconds}s) → オフライン続行');
+    } else {
+      AisaDebugLogger.instance.info('[Offline] ライブ静止検出 (${waited.inSeconds}s待機)');
     }
   }
 
@@ -48,9 +58,12 @@ class AisaTranscriptionService {
 
   // ──── ライブ優先制御 ────
   /// ライブ呼び出しのクールダウン: 最後のライブ呼び出しから何秒までを "active" 扱いにするか
-  static const Duration _liveCooldown = Duration(seconds: 5);
+  /// ライブは5秒ティックで動くので、2ティック分+余裕の15秒にすることでバースト中の隙間に
+  /// オフラインが割り込むのを防ぐ
+  static const Duration _liveCooldown = Duration(seconds: 15);
   /// ライブ待機の最大時間（永遠に待ち続けないためのフェイルセーフ）
-  static const Duration _liveWaitDefaultLimit = Duration(seconds: 30);
+  /// 会話は数分続くことを想定し、3分まで待つ。超えた場合はログを残してオフラインを進行させる
+  static const Duration _liveWaitDefaultLimit = Duration(minutes: 3);
   static const Duration _liveWaitPollInterval = Duration(milliseconds: 500);
 
   // ──── 音量・音声判定しきい値 ────
@@ -113,7 +126,11 @@ class AisaTranscriptionService {
   /// [previousContext]: 直前チャンクの末尾テキスト（Whisperプロンプトに付加して文脈を提供）
   /// 失敗時は例外をthrow（呼び出し元でリトライ処理するため）
   /// WAVファイルの削除は呼び出し元の責任
+  ///
+  /// 【ライブ優先ゲート】オフライン側はAPI送信直前に必ず待機ポイントを通る。
+  /// これによりリトライループ内でライブに割り込むことを防ぐ。
   Future<String?> transcribeOnly(File wavFile, {String? previousContext}) async {
+    await waitForLiveQuiet();
     return await _transcribe(wavFile, previousContext: previousContext); // 例外はそのまま上に伝播
   }
 
@@ -121,6 +138,9 @@ class AisaTranscriptionService {
   /// チャンク単位の軽量処理。会話バッファリングの各ティックで使う。
   /// WAVファイルの削除は呼び出し元の責任。
   Future<String?> transcribeChunkOnly(File wavFile, {String? previousContext}) async {
+    // 開始時にもタイムスタンプを更新することで、isLiveActiveが連続ティック間のギャップで
+    // falseにならないようにする。オフライン側のwaitForLiveQuietが早期に解除されるのを防ぐ
+    _lastLiveCallAt = DateTime.now();
     _liveInFlight++;
     try {
       final result = await _transcribe(wavFile, previousContext: previousContext, skipClaude: true);
@@ -128,6 +148,7 @@ class AisaTranscriptionService {
       return result;
     } finally {
       _liveInFlight--;
+      _lastLiveCallAt = DateTime.now();
     }
   }
 

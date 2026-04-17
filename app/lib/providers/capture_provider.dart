@@ -1462,7 +1462,19 @@ class CaptureProvider extends ChangeNotifier
           AisaDebugLogger.instance.info('📎 チャンクをハルシネーション除去（蓄積テキストは維持）');
         }
       } catch (e) {
+        // 429 (Groqレート制限) を最優先で可視化: オフライン同期との競合が疑われる
+        final msg = e.toString();
+        final isRateLimit = msg.contains('429') || msg.toLowerCase().contains('rate limit');
+        if (isRateLimit) {
+          AisaDebugLogger.instance.error(
+              '🚫 ライブ文字起こしがGroqレート制限で失敗 (429) — オフライン同期と競合中の可能性');
+        } else if (msg.contains('TimeoutException')) {
+          AisaDebugLogger.instance.warning('⏱ ライブ文字起こしタイムアウト: $msg');
+        } else {
+          AisaDebugLogger.instance.error('❌ ライブ文字起こし失敗: $msg');
+        }
         Logger.debug('[AISA] チャンク処理失敗: $e');
+        // チャンク単位の失敗なので無音扱いにはせず、次ティックで新規フレームで再挑戦
       } finally {
         try {
           if (wavFile != null && await wavFile.exists()) await wavFile.delete();
