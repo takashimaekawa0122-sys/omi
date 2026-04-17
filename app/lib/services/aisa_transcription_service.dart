@@ -354,6 +354,8 @@ class AisaTranscriptionService {
     int skippedQuiet = 0;
 
     final buffer = StringBuffer();
+    String? lastKeptText; // 連続重複検出用
+    int consecutiveSameCount = 0;
     for (final seg in segments) {
       final noSpeechProb = (seg['no_speech_prob'] as num?)?.toDouble() ?? 0.0;
       final avgLogprob = (seg['avg_logprob'] as num?)?.toDouble() ?? 0.0;
@@ -382,6 +384,40 @@ class AisaTranscriptionService {
         debugPrint('[AISA VAD] 除外(hallucination): "$text"');
         skippedNoSpeech++;
         continue;
+      }
+
+      // 【短文の信頼度厳格化】犬の鳴き声・環境音をWhisperが短い日本語に誤変換するパターン対策
+      // 2〜3文字の短いセグメントは通常より厳しい閾値を適用する
+      final textLen = text.replaceAll(RegExp(r'[。、！？.!?\s]'), '').length;
+      if (textLen <= 3) {
+        // 短い発話は no_speech_prob を半分の閾値で判定（0.6→0.3）
+        // かつ avg_logprob も厳しく（-1.0→-0.5）
+        if (noSpeechProb >= 0.3) {
+          debugPrint('[AISA VAD] 除外(短文+high_no_speech=$noSpeechProb): "$text"');
+          skippedNoSpeech++;
+          continue;
+        }
+        if (avgLogprob < -0.5) {
+          debugPrint('[AISA VAD] 除外(短文+low_logprob=$avgLogprob): "$text"');
+          skippedLowConf++;
+          continue;
+        }
+      }
+
+      // 【連続重複検出】同じ短文が3回連続する場合は2回目以降をスキップ
+      // 「はいはいはい」「ありがとうございましたありがとうございました」等の
+      // Whisperハルシネーションパターンを段階的に除去する
+      final normalizedText = text.replaceAll(RegExp(r'[。、！？.!?\s]'), '');
+      if (lastKeptText == normalizedText && normalizedText.length <= 15) {
+        consecutiveSameCount++;
+        if (consecutiveSameCount >= 2) {
+          debugPrint('[AISA VAD] 除外(重複${consecutiveSameCount + 1}回目): "$text"');
+          skippedNoSpeech++;
+          continue;
+        }
+      } else {
+        consecutiveSameCount = 0;
+        lastKeptText = normalizedText;
       }
 
       // 音量フィルタ: 極端に小さい音量（ほぼ無音）のみ除外する。
@@ -636,6 +672,28 @@ class AisaTranscriptionService {
       '効果音',
       // ネタ系
       'いい加減にしろ',
+      // 動物の鳴き声（Whisperが環境音を日本語に誤変換するパターン）
+      'ワン', 'ワンワン', 'ワンワンワン',
+      'わん', 'わんわん', 'わんわんわん',
+      'ワウ', 'わう',
+      'キャン', 'きゃん', 'キャンキャン', 'きゃんきゃん',
+      'ニャー', 'にゃー', 'ニャン', 'にゃん', 'ニャー ニャー',
+      'ニャンニャン', 'にゃんにゃん',
+      'モー', 'もー',
+      'メェ', 'めぇ', 'メー', 'めー',
+      'ガオー', 'がおー',
+      'ブーブー', 'ぶーぶー',
+      'チュンチュン', 'ちゅんちゅん',
+      'コケコッコー', 'こけこっこー',
+      'カーカー', 'かーかー',
+      // 犬関連の擬態語
+      '犬の鳴き声', 'いぬの鳴き声',
+      // 笑い声・泣き声等の非言語音（単独なら通常ノイズ）
+      'ハハハ', 'ははは', 'ヘヘヘ', 'へへへ', 'フフフ', 'ふふふ',
+      'あはは', 'うふふ', 'へへへへ',
+      'ウーン', 'うーん', 'ウー', 'うー',
+      'グスン', 'ぐすん', 'シクシク', 'しくしく',
+      'ハァ', 'はぁ', 'フー', 'ふー',
       // 英語圏Whisperハルシネーション
       'Thanks for watching',
       'Thanks for watching!',
@@ -659,6 +717,12 @@ class AisaTranscriptionService {
     ];
     for (final h in exactHallucinations) {
       if (t == h || t == '$h。' || t == '$h！' || t == '$h.') return true;
+    }
+    // 句読点・空白のゆらぎを正規化して再判定（「 ありがとうございました 。」等の微妙なズレを捕捉）
+    final normalized = t.replaceAll(RegExp(r'[。、！？.!?\s]'), '');
+    for (final h in exactHallucinations) {
+      final hNormalized = h.replaceAll(RegExp(r'[。、！？.!?\s]'), '');
+      if (hNormalized.isNotEmpty && normalized == hNormalized) return true;
     }
 
     // プロンプトエコー系・ノイズ系は部分一致で判定
@@ -866,6 +930,13 @@ class AisaTranscriptionService {
 ・「ありがとうございました」「はい」「そうですね」等の短い相槌が不自然に連続する場合は削除または1回に集約
 ・話者タグが異なっても内容が完全に同じ繰り返しは1つに集約
 ・F0マーカーの値が多少違っても、同一人物の同一発話が繰り返されている場合は統合する
+・「はい」が3回以上連続する場合は、会話の文脈に必然性がなければ全て削除する（Whisperが無音から生成するノイズパターン）
+・「ありがとうございました」が文脈なく単発で現れる場合は削除（ビデオ終了時のハルシネーション）
+
+【動物の鳴き声・環境音の削除】
+・「ワン」「ワンワン」「ニャー」「ニャン」「モー」等の明らかな動物の鳴き声は削除
+・「ハハハ」「フフフ」等の笑い声が単独で出る場合は削除（文脈上意味がある場合のみ残す）
+・「ハァ」「フー」等のため息・呼吸音は削除
 
 【TV/動画/ゲーム音声の削除ルール（厳格）】
 以下に該当する内容は全文まるごと削除し、出力に含めない：
