@@ -162,12 +162,13 @@ class AisaTranscriptionService {
   }
 
   /// Firestore保存用に Claude 出力をタイトル/絵文字/本文に分解する軽量パーサ。
-  /// Claudeは「タイトル\t絵文字\n本文」形式で返すが、本文が空になるケースに備えて
-  /// body が空なら全文をbodyに採用する。capture_provider._parseAisaTitleAndEmoji と
-  /// 同じ意図だが、UI特有のフォールバック（fallbackTitle）は不要なためここで独自実装する。
+  /// Claudeは原則「タイトル\t絵文字\n本文」形式で返すが、スペース区切りや
+  /// 1行に全て詰められた形式で返ることがあるため、複数パターンを許容する。
   static ({String? title, String? emoji, String body}) _parseForFirestore(String raw) {
-    final cleaned = _stripF0Markers(raw);
+    final cleaned = _stripF0Markers(raw).trim();
     final lines = cleaned.split('\n');
+
+    // パターン1: 「タイトル\t絵文字」＋改行＋本文
     if (lines.isNotEmpty && lines[0].contains('\t')) {
       final parts = lines[0].split('\t');
       if (parts.length >= 2 && parts[0].trim().isNotEmpty) {
@@ -178,7 +179,51 @@ class AisaTranscriptionService {
         }
       }
     }
+
+    // パターン2: 「タイトル 絵文字」（スペース区切り）＋改行＋本文
+    // Claude が \t の指示を無視したケースの保険
+    if (lines.length >= 2) {
+      final parsed = _extractTitleAndEmojiFromSingleLine(lines[0]);
+      if (parsed != null) {
+        final body = lines.skip(1).join('\n').trim();
+        if (body.isNotEmpty) {
+          return (title: parsed.title, emoji: parsed.emoji, body: body);
+        }
+      }
+    }
+
+    // パターン3: 1行にまとめられている（例: 「タイトル 絵文字 [自分🧔] 本文...」）
+    // 本文中に話者タグ `[自分` `[相手` が出現する位置で前後を分割する
+    final tagMatch = RegExp(r'\[(自分|相手|[^\[\]]{1,20})[^\[\]]*\]').firstMatch(cleaned);
+    if (tagMatch != null && tagMatch.start > 0) {
+      final prefix = cleaned.substring(0, tagMatch.start).trim();
+      final body = cleaned.substring(tagMatch.start).trim();
+      final parsedPrefix = _extractTitleAndEmojiFromSingleLine(prefix);
+      if (parsedPrefix != null && body.isNotEmpty) {
+        return (title: parsedPrefix.title, emoji: parsedPrefix.emoji, body: body);
+      }
+    }
+
     return (title: null, emoji: null, body: cleaned);
+  }
+
+  /// 「タイトル 絵文字」形式の1行を分解する。末尾の絵文字1個＋その前のテキストをタイトルと解釈。
+  /// 戻り値: タイトルと絵文字のどちらかが空なら null。
+  static ({String title, String emoji})? _extractTitleAndEmojiFromSingleLine(String line) {
+    final trimmed = line.trim();
+    if (trimmed.isEmpty || trimmed.length > 60) return null;
+    // 末尾に絵文字（サロゲートペア含む）が来ていれば抽出
+    // 簡易実装: Unicode 記号/絵文字ブロックを末尾マッチ
+    final emojiPattern = RegExp(
+      r'([\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{2190}-\u{21FF}\u{2300}-\u{23FF}\u{2B00}-\u{2BFF}\u{1F000}-\u{1F02F}\u{1F0A0}-\u{1F0FF}\u{1F100}-\u{1F1FF}\u{1F200}-\u{1F2FF}\u{1F900}-\u{1F9FF}]+)\s*$',
+      unicode: true,
+    );
+    final match = emojiPattern.firstMatch(trimmed);
+    if (match == null) return null;
+    final emoji = match.group(1)!.trim();
+    final title = trimmed.substring(0, match.start).trim();
+    if (title.isEmpty || emoji.isEmpty) return null;
+    return (title: title, emoji: emoji);
   }
 
   /// 蓄積済みテキストをClaude校正＋話者分離してFirestoreに保存する

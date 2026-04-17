@@ -23,25 +23,34 @@ class AisaChatBubbleWidget extends StatelessWidget {
   }
 
   List<_ChatMessage> _parseMessages(String text) {
-    final lines = text.split('\n').where((l) => l.trim().isNotEmpty).toList();
     final messages = <_ChatMessage>[];
-    final tagPattern = RegExp(r'^\[(.+?)\]\s*');
-    String lastSpeaker = '自分';
+    // 全文から `[xxx]` タグを検索する（行頭/行中どこでも、1行に複数あっても可）。
+    // タグが改行なしで連続する「タイトル [自分🧔] 本文 [相手👨] 本文2」のような
+    // 非正規フォーマットにも対応。
+    final tagPattern = RegExp(r'\[([^\[\]\n]{1,40})\]');
+    final matches = tagPattern.allMatches(text).toList();
 
-    for (final line in lines) {
-      final match = tagPattern.firstMatch(line);
-      if (match != null) {
-        lastSpeaker = match.group(1)!;
-        final messageText = line.substring(match.end).trim();
-        if (messageText.isNotEmpty) {
-          messages.add(_ChatMessage(speaker: lastSpeaker, text: messageText));
-        }
-      } else {
-        // タグなし行は直前の話者を引き継ぐ
-        messages.add(_ChatMessage(speaker: lastSpeaker, text: line.trim()));
+    if (matches.isEmpty) {
+      // タグなし: 全文を「自分」バブルにする（最悪でも白紙にはならない）
+      final trimmed = text.trim();
+      if (trimmed.isNotEmpty) {
+        messages.add(_ChatMessage(speaker: '自分', text: trimmed));
       }
+      return messages;
     }
 
+    // 最初のタグより前のテキスト（タイトル残渣等）は捨てる
+    for (int i = 0; i < matches.length; i++) {
+      final m = matches[i];
+      final speaker = m.group(1)!.trim();
+      if (speaker.isEmpty) continue;
+      final start = m.end;
+      final end = (i + 1 < matches.length) ? matches[i + 1].start : text.length;
+      final msgText = text.substring(start, end).trim();
+      if (msgText.isNotEmpty) {
+        messages.add(_ChatMessage(speaker: speaker, text: msgText));
+      }
+    }
     return messages;
   }
 

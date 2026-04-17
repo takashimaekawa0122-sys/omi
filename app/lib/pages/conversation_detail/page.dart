@@ -1411,9 +1411,10 @@ class _TranscriptWidgetsState extends State<TranscriptWidgets> with AutomaticKee
                 );
               }
 
-              // A.I.S.A. 会話かつ [話者] タグを含む場合は LINE 風チャットバブルで表示する。
-              // `[自分]` / `[相手]` / `[名前]` 形式をパースして、自分=右寄せ紫バブル、相手=左寄せグレーバブルに描画。
-              if (isAisa && fallbackText.contains(RegExp(r'^\[.+?\]', multiLine: true))) {
+              // A.I.S.A. 会話かつ `[自分` or `[相手` タグを含む場合は LINE 風チャットバブルで表示。
+              // `[自分]` / `[相手]` / `[自分🧔]` / `[相手👨]` 等、絵文字付きタグにもマッチ。
+              // 行頭限定ではなく「本文中のどこかに出現」で判定（Claudeが1行に詰めてきても対応）。
+              if (isAisa && RegExp(r'\[(自分|相手)').hasMatch(fallbackText)) {
                 return Padding(
                   padding: const EdgeInsets.fromLTRB(12, 24, 12, 150),
                   child: AisaChatBubbleWidget(content: fallbackText),

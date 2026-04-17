@@ -2060,26 +2060,70 @@ class _AisaParsed {
   const _AisaParsed({required this.title, required this.emoji, required this.body});
 }
 
+/// Claude が返す本文冒頭からタイトル＋絵文字を取り除き、3通りの形式に耐える。
+/// 想定形式:
+///   A. `タイトル\t絵文字\n本文`（期待形式）
+///   B. `タイトル 絵文字\n本文`（スペース区切り、Claude が \t 指示を守らなかったケース）
+///   C. `タイトル 絵文字 [自分🧔] 本文...`（全て1行にまとまった形式）
 _AisaParsed _parseAisaTitleAndEmoji(String text, DateTime timestamp) {
   final fallbackTitle = '${timestamp.hour.toString().padLeft(2, '0')}:${timestamp.minute.toString().padLeft(2, '0')} の会話';
+  const defaultEmoji = '🎙️';
   // F0マーカー残留ガード（Claude失敗時の保険）
-  final cleanedText = AisaTranscriptionService.stripF0Markers(text);
+  final cleanedText = AisaTranscriptionService.stripF0Markers(text).trim();
   final lines = cleanedText.split('\n');
+
+  // パターンA: `\t` 区切り
   if (lines.isNotEmpty && lines[0].contains('\t')) {
     final parts = lines[0].split('\t');
     if (parts.length >= 2 && parts[0].trim().isNotEmpty) {
-      // タイトルから話者タグ（[自分🧔] 等）が混入した場合は除去
       final titleRaw = parts[0].trim().replaceAll(RegExp(r'^\[[^\]]+\]\s*'), '').trim();
       final title = titleRaw.isNotEmpty ? titleRaw : fallbackTitle;
       final body = lines.skip(1).join('\n').trim();
-      // 本文空ガード: Claudeが1行目だけ返してきた場合、本文が空になると
-      // 会話詳細画面で何も表示されなくなる。その場合はフォールバックで全文を本文に採用。
       if (body.isNotEmpty) {
         return _AisaParsed(title: title, emoji: parts[1].trim(), body: body);
       }
-      // タイトル行しか無い → タイトル抽出は諦めて全文を本文にする（文字起こしを失わない）
-      return _AisaParsed(title: fallbackTitle, emoji: '🎙️', body: cleanedText);
+      return _AisaParsed(title: fallbackTitle, emoji: defaultEmoji, body: cleanedText);
     }
   }
-  return _AisaParsed(title: fallbackTitle, emoji: '🎙️', body: cleanedText);
+
+  // パターンB: 「タイトル 絵文字\n本文」
+  if (lines.length >= 2) {
+    final parsed = _extractTitleAndEmojiFromSingleLine(lines[0]);
+    if (parsed != null) {
+      final body = lines.skip(1).join('\n').trim();
+      if (body.isNotEmpty) {
+        return _AisaParsed(title: parsed.title, emoji: parsed.emoji, body: body);
+      }
+    }
+  }
+
+  // パターンC: 1行全部（タイトル 絵文字 の後に `[自分` 等が続く）
+  final tagMatch = RegExp(r'\[(自分|相手)').firstMatch(cleanedText);
+  if (tagMatch != null && tagMatch.start > 0) {
+    final prefix = cleanedText.substring(0, tagMatch.start).trim();
+    final body = cleanedText.substring(tagMatch.start).trim();
+    final parsedPrefix = _extractTitleAndEmojiFromSingleLine(prefix);
+    if (parsedPrefix != null && body.isNotEmpty) {
+      return _AisaParsed(title: parsedPrefix.title, emoji: parsedPrefix.emoji, body: body);
+    }
+  }
+
+  return _AisaParsed(title: fallbackTitle, emoji: defaultEmoji, body: cleanedText);
+}
+
+/// 「タイトル 絵文字」1行を分解する。末尾に絵文字1個、その前をタイトルと解釈。
+/// 成功時のみ値を返す。
+({String title, String emoji})? _extractTitleAndEmojiFromSingleLine(String line) {
+  final trimmed = line.trim();
+  if (trimmed.isEmpty || trimmed.length > 60) return null;
+  final emojiPattern = RegExp(
+    r'([\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{2190}-\u{21FF}\u{2300}-\u{23FF}\u{2B00}-\u{2BFF}\u{1F000}-\u{1F02F}\u{1F0A0}-\u{1F0FF}\u{1F100}-\u{1F1FF}\u{1F200}-\u{1F2FF}\u{1F900}-\u{1F9FF}]+)\s*$',
+    unicode: true,
+  );
+  final match = emojiPattern.firstMatch(trimmed);
+  if (match == null) return null;
+  final emoji = match.group(1)!.trim();
+  final title = trimmed.substring(0, match.start).trim();
+  if (title.isEmpty || emoji.isEmpty) return null;
+  return (title: title, emoji: emoji);
 }
