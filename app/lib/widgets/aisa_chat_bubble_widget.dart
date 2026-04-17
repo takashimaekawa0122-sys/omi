@@ -45,10 +45,39 @@ class AisaChatBubbleWidget extends StatelessWidget {
     return messages;
   }
 
+  /// 話者タグから属性絵文字を抽出する。例: `自分🧔` → `🧔`、`相手👨` → `👨`、`自分` → null
+  String? _extractSpeakerEmoji(String speaker) {
+    // 「自分」「相手」プレフィックスを除去して残りを絵文字候補として返す
+    String rest = speaker;
+    if (rest.startsWith('自分')) rest = rest.substring(2);
+    else if (rest.startsWith('相手')) rest = rest.substring(2);
+    rest = rest.trim();
+    return rest.isEmpty ? null : rest;
+  }
+
+  /// 話者タグが「自分」系かどうか判定（`自分` `自分🧔` `自分👩` 等すべてを自分扱い）
+  bool _isSelf(String speaker) => speaker.startsWith('自分');
+
+  /// 話者ラベルの表示文字列を決める。名前ベース（「田中」等）はそのまま、
+  /// `自分` は「自分」、`相手` は「不明」、`相手👨` は「👨 相手」のように表示。
+  String _speakerLabel(String speaker) {
+    if (_isSelf(speaker)) return '自分';
+    if (speaker == '相手') return '不明';
+    if (speaker.startsWith('相手')) {
+      final emoji = _extractSpeakerEmoji(speaker);
+      return emoji != null ? '$emoji 相手' : '相手';
+    }
+    return speaker;
+  }
+
   Widget _buildBubble(_ChatMessage msg) {
-    final isSelf = msg.speaker == '自分';
+    final isSelf = _isSelf(msg.speaker);
     final bubbleColor = isSelf ? const Color(0xFF6C63FF) : const Color(0xFF35343B);
     final alignment = isSelf ? CrossAxisAlignment.end : CrossAxisAlignment.start;
+    // タグに含まれる絵文字があればそれをアバターに使う。無ければ既定絵文字。
+    final tagEmoji = _extractSpeakerEmoji(msg.speaker);
+    final selfEmoji = tagEmoji ?? '🎙️';
+    final otherEmoji = tagEmoji ?? '👤';
 
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 3),
@@ -63,8 +92,8 @@ class AisaChatBubbleWidget extends StatelessWidget {
               bottom: 2,
             ),
             child: Text(
-              isSelf ? '自分' : (msg.speaker == '相手' ? '不明' : msg.speaker),
-              style: TextStyle(
+              _speakerLabel(msg.speaker),
+              style: const TextStyle(
                 color: Colors.white38,
                 fontSize: 11,
                 fontWeight: FontWeight.w500,
@@ -76,7 +105,7 @@ class AisaChatBubbleWidget extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
               if (!isSelf) ...[
-                const Text('👤', style: TextStyle(fontSize: 20)),
+                Text(otherEmoji, style: const TextStyle(fontSize: 20)),
                 const SizedBox(width: 6),
               ],
               Flexible(
@@ -103,7 +132,7 @@ class AisaChatBubbleWidget extends StatelessWidget {
               ),
               if (isSelf) ...[
                 const SizedBox(width: 6),
-                const Text('🎙️', style: TextStyle(fontSize: 20)),
+                Text(selfEmoji, style: const TextStyle(fontSize: 20)),
               ],
             ],
           ),

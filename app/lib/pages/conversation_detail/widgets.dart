@@ -764,7 +764,9 @@ class AppResultDetailWidget extends StatelessWidget {
                       ),
                     ],
                   )
-                : content.contains('[自分]')
+                : RegExp(r'^\[(自分|相手)', multiLine: true).hasMatch(content)
+                    // `[自分]` `[自分🧔]` `[相手👨]` 等の話者タグがあれば LINE 風バブルで表示。
+                    // 絵文字付きタグでもマッチするよう絵文字なしの `[自分` / `[相手` プレフィックスで判定する。
                     ? AisaChatBubbleWidget(content: content)
                     : ConversationMarkdownWidget(
                         content: content,

@@ -28,6 +28,7 @@ import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/other/temp.dart';
 import 'package:omi/utils/platform/platform_service.dart';
+import 'package:omi/widgets/aisa_chat_bubble_widget.dart';
 import 'package:omi/widgets/conversation_bottom_bar.dart';
 import 'package:omi/widgets/dialog.dart';
 import 'package:omi/widgets/expandable_text.dart';
@@ -1397,7 +1398,7 @@ class _TranscriptWidgetsState extends State<TranscriptWidgets> with AutomaticKee
                 fallbackText = rawFallback;
               }
 
-              // 本文が空の場合はプレースホルダを表示（ExpandableTextWidget は空文字で layout が無駄になる）
+              // 本文が空の場合はプレースホルダを表示
               if (fallbackText.trim().isEmpty) {
                 return Padding(
                   padding: const EdgeInsets.only(top: 32),
@@ -1410,12 +1411,20 @@ class _TranscriptWidgetsState extends State<TranscriptWidgets> with AutomaticKee
                 );
               }
 
+              // A.I.S.A. 会話かつ [話者] タグを含む場合は LINE 風チャットバブルで表示する。
+              // `[自分]` / `[相手]` / `[名前]` 形式をパースして、自分=右寄せ紫バブル、相手=左寄せグレーバブルに描画。
+              if (isAisa && fallbackText.contains(RegExp(r'^\[.+?\]', multiLine: true))) {
+                return Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 24, 12, 150),
+                  child: AisaChatBubbleWidget(content: fallbackText),
+                );
+              }
+
               return Padding(
                 padding: const EdgeInsets.only(top: 32),
                 child: ExpandableTextWidget(
                   text: fallbackText,
                   // maxLines=1000 は TextPainter.layout が重くなるため 100 に抑える。
-                  // A.I.S.A. 本文は通常数十行なので 100 行あれば十分、長文は Show more で展開可能。
                   maxLines: 100,
                   linkColor: Colors.grey.shade300,
                   style: TextStyle(color: Colors.grey.shade300, fontSize: 15, height: 1.3),
