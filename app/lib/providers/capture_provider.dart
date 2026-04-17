@@ -1468,6 +1468,18 @@ class CaptureProvider extends ChangeNotifier
         if (isRateLimit) {
           AisaDebugLogger.instance.error(
               '🚫 ライブ文字起こしがGroqレート制限で失敗 (429) — オフライン同期と競合中の可能性');
+          // 【フレーム保全】429時は捨てずに次ティックで再挑戦する。
+          // ただし無制限に肥大化させないよう上限を設ける（約10分ぶん = 12000フレーム）。
+          const maxRetainedFrames = 12000;
+          if (_aisaFrameBuffer.length + frames.length <= maxRetainedFrames) {
+            // 保全: バッファの先頭に戻す（時系列を維持するため insertAll(0, ...)）
+            _aisaFrameBuffer.insertAll(0, frames);
+            AisaDebugLogger.instance.info(
+                '↩ 429のため${frames.length}フレームを保全（バッファ: ${_aisaFrameBuffer.length}）');
+          } else {
+            AisaDebugLogger.instance.warning(
+                '⚠ バッファ上限超過 → ${frames.length}フレームを破棄');
+          }
         } else if (msg.contains('TimeoutException')) {
           AisaDebugLogger.instance.warning('⏱ ライブ文字起こしタイムアウト: $msg');
         } else {

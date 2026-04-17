@@ -31,8 +31,22 @@ class AisaOfflineSyncService {
   bool _isCancelled = false;
   bool _isSyncing = false;
 
+  /// ライブ優先のウォームアップ時間。
+  /// アプリ起動〜BLE接続直後はライブ会話を優先させるため、
+  /// この時間が経つまでオフライン同期のAPI呼び出しを保留する。
+  /// Omiペンダント側の既存録音が大量にある場合にGroqレート枠を使い切り、
+  /// ライブ文字起こしが最初の数分間まったく動かなくなる問題への対策。
+  static const Duration _liveWarmupDuration = Duration(seconds: 120);
+
+  /// プロセス起動時刻（サービス初期化時に固定）
+  final DateTime _serviceStartedAt = DateTime.now();
+
   /// 外部から同期中かどうかを確認するためのプロパティ（二重実行防止用）
   bool get isSyncing => _isSyncing;
+
+  /// ウォームアップ期間が終了しているか（テスト・デバッグ用）
+  bool get isWarmupComplete =>
+      DateTime.now().difference(_serviceStartedAt) >= _liveWarmupDuration;
 
   /// 進行中の同期を中断する（手動同期開始時にSyncProviderから呼ばれる）
   void cancelSync() {
@@ -79,6 +93,27 @@ class AisaOfflineSyncService {
 
     debugPrint('[AISA Offline] ${diskWals.length}件のオフライン録音を処理開始');
     AisaDebugLogger.instance.info('[Offline] ${diskWals.length}件のオフライン録音を処理開始');
+
+    // 【ライブ優先ウォームアップ】起動から _liveWarmupDuration 経過するまで待機する。
+    // Omiペンダントの既存録音が大量に存在する場合、即座にGroqを叩くと
+    // ライブ側が429で窒息するため、最初の約2分はライブを優先させる。
+    final elapsed = DateTime.now().difference(_serviceStartedAt);
+    if (elapsed < _liveWarmupDuration) {
+      final remaining = _liveWarmupDuration - elapsed;
+      AisaDebugLogger.instance.info(
+          '[Offline] ウォームアップ待機: 残り${remaining.inSeconds}秒（ライブ優先）');
+      debugPrint('[AISA Offline] ウォームアップ待機: 残り${remaining.inSeconds}秒');
+      // キャンセル可能な待機（1秒ごとにチェック）
+      final deadline = DateTime.now().add(remaining);
+      while (DateTime.now().isBefore(deadline) && !_isCancelled) {
+        await Future.delayed(const Duration(seconds: 1));
+      }
+      if (_isCancelled) {
+        AisaDebugLogger.instance.info('[Offline] ウォームアップ中にキャンセル');
+        return;
+      }
+      AisaDebugLogger.instance.info('[Offline] ウォームアップ完了 → 同期開始');
+    }
 
     // Omiクラウドへの音声流出を防ぐため、Groq処理の前に全WALをsynced済みとしてマークする
     // 【パフォーマンス最適化】全WALのstatusを直接更新してから最後に1回だけ保存・通知する
