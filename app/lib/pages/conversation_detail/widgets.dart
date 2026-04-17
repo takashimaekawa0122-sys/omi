@@ -886,12 +886,28 @@ class GetAppsWidgets extends StatelessWidget {
     return Consumer<ConversationDetailProvider>(
       builder: (context, provider, child) {
         final summarizedApp = provider.getSummarizedApp();
+        // A.I.S.A.会話はOmi公式のSummary生成バックエンドを使わないため、
+        // 「サマリーを生成」ボタン（SummarizedAppsBottomSheet）は誤タップ防止のため非表示。
+        // 代わりに「Transcriptタブで確認してください」とガイドする。
+        final isAisa = provider.conversation.id.startsWith('aisa_');
         return Column(
           mainAxisSize: MainAxisSize.min,
           mainAxisAlignment: MainAxisAlignment.start,
           crossAxisAlignment: summarizedApp == null ? CrossAxisAlignment.center : CrossAxisAlignment.start,
           children: summarizedApp == null
-              ? [child!]
+              ? [
+                  if (isAisa)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
+                      child: Text(
+                        'A.I.S.A.会話はサマリー生成に対応していません。\n「文字起こし」タブをご覧ください。',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: Colors.grey.shade300, fontSize: 15, height: 1.4),
+                      ),
+                    )
+                  else
+                    child!,
+                ]
               : [
                   // Show the summarized app
                   if (!provider.conversation.discarded) ...[

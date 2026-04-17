@@ -155,7 +155,14 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
   void initState() {
     super.initState();
 
-    _controller = TabController(length: 3, vsync: this, initialIndex: widget.initialTabIndex);
+    // A.I.S.A.会話（aisa_ プレフィックスのID）は Transcript タブを既定に切り替え。
+    // A.I.S.A.はOmi公式のSummary生成バックエンドを使わないため、Summaryタブだと本文が見えない。
+    final isAisa = widget.conversation.id.startsWith('aisa_');
+    final effectiveInitialIndex = isAisa ? 0 : widget.initialTabIndex;
+    _controller = TabController(length: 3, vsync: this, initialIndex: effectiveInitialIndex);
+    if (isAisa) {
+      selectedTab = ConversationTab.transcript;
+    }
     _controller!.addListener(() {
       setState(() {
         String? tabName;
@@ -1374,10 +1381,16 @@ class _TranscriptWidgetsState extends State<TranscriptWidgets> with AutomaticKee
             final photos = conversation.photos;
 
             if (segments.isEmpty && photos.isEmpty) {
+              // A.I.S.A.会話は transcriptSegments が空で structured.overview に本文が入る設計。
+              // Omi公式の externalIntegration フォールバックでは拾えないため overview をフォールバック表示する。
+              final isAisa = conversation.id.startsWith('aisa_');
+              final fallbackText = isAisa
+                  ? conversation.structured.overview
+                  : (provider.conversation.externalIntegration?.text ?? '');
               return Padding(
                 padding: const EdgeInsets.only(top: 32),
                 child: ExpandableTextWidget(
-                  text: (provider.conversation.externalIntegration?.text ?? '').decodeString,
+                  text: fallbackText.decodeString,
                   maxLines: 1000,
                   linkColor: Colors.grey.shade300,
                   style: TextStyle(color: Colors.grey.shade300, fontSize: 15, height: 1.3),

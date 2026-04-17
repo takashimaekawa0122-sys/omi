@@ -89,7 +89,16 @@ class AisaFirestoreService {
     }
   }
 
-  Future<String?> saveTranscript(String transcript) async {
+  /// Firestoreへ会話を保存する。
+  /// [transcript] は Claude 出力の生テキスト（"タイトル\t絵文字\n本文" 形式）。
+  /// [title] / [emoji] / [body] を渡すとパース済みフィールドも一緒に保存する（後方互換のため任意）。
+  /// パース済みフィールドがあれば読み込み時の再パース事故を防げる。
+  Future<String?> saveTranscript(
+    String transcript, {
+    String? title,
+    String? emoji,
+    String? body,
+  }) async {
     if (!_initialized || _firestore == null) {
       AisaDebugLogger.instance.warning('⚠ Firestore未初期化 - 保存スキップ');
       return null;
@@ -102,16 +111,22 @@ class AisaFirestoreService {
         '${now.month.toString().padLeft(2, '0')}-'
         '${now.day.toString().padLeft(2, '0')}';
 
+    final data = <String, dynamic>{
+      'text': transcript, // 後方互換のため生テキストも残す
+      'timestampMs': now.millisecondsSinceEpoch,
+      'deleted': false,
+      'source': 'groq',
+    };
+    // パース済みフィールド（新スキーマ）
+    if (title != null && title.trim().isNotEmpty) data['title'] = title.trim();
+    if (emoji != null && emoji.trim().isNotEmpty) data['emoji'] = emoji.trim();
+    if (body != null && body.trim().isNotEmpty) data['body'] = body.trim();
+
     final docRef = await _firestore!
         .collection('sessions')
         .doc(dateStr)
         .collection('entries')
-        .add({
-      'text': transcript,
-      'timestampMs': now.millisecondsSinceEpoch,
-      'deleted': false,
-      'source': 'groq',
-    });
+        .add(data);
 
     AisaDebugLogger.instance.info('Firestore保存: $dateStr (${transcript.length}文字)');
     debugPrint('[AISA] Groq文字起こし保存成功: $dateStr id=${docRef.id}');
@@ -160,6 +175,9 @@ class AisaFirestoreService {
             id: doc.id,
             text: text,
             timestamp: DateTime.fromMillisecondsSinceEpoch(timestampMs),
+            title: data['title'] as String?,
+            emoji: data['emoji'] as String?,
+            body: data['body'] as String?,
           ));
         }
       } catch (e) {
@@ -207,10 +225,25 @@ class AisaFirestoreService {
 }
 
 /// Firestoreから読み込んだ会話エントリ
+/// 新スキーマでは [title] / [emoji] / [body] がパース済みで保存されている。
+/// レガシースキーマでは [text] のみ（呼び出し側で再パースする）。
 class AisaEntry {
   final String id;
   final String text;
   final DateTime timestamp;
+  final String? title;
+  final String? emoji;
+  final String? body;
 
-  AisaEntry({required this.id, required this.text, required this.timestamp});
+  AisaEntry({
+    required this.id,
+    required this.text,
+    required this.timestamp,
+    this.title,
+    this.emoji,
+    this.body,
+  });
+
+  /// 新スキーマで保存されているか（パース済みフィールドを持つか）
+  bool get hasParsedFields => (body != null && body!.trim().isNotEmpty);
 }

@@ -1592,15 +1592,27 @@ class CaptureProvider extends ChangeNotifier
       AisaDebugLogger.instance.info('Firestore復元: ${entries.length}件');
 
       for (final entry in entries) {
-        final parsed = _parseAisaTitleAndEmoji(entry.text, entry.timestamp);
+        // 新スキーマ: title/emoji/body がFirestoreに保存されていればそのまま使う（再パース事故を防ぐ）
+        // レガシースキーマ: text のみ → _parseAisaTitleAndEmoji で再パース
+        final String title;
+        final String emoji;
+        final String body;
+        if (entry.hasParsedFields) {
+          final fallbackTitle =
+              '${entry.timestamp.hour.toString().padLeft(2, '0')}:${entry.timestamp.minute.toString().padLeft(2, '0')} の会話';
+          title = (entry.title?.trim().isNotEmpty ?? false) ? entry.title!.trim() : fallbackTitle;
+          emoji = (entry.emoji?.trim().isNotEmpty ?? false) ? entry.emoji!.trim() : '🎙️';
+          body = entry.body!.trim();
+        } else {
+          final parsed = _parseAisaTitleAndEmoji(entry.text, entry.timestamp);
+          title = parsed.title;
+          emoji = parsed.emoji;
+          body = parsed.body;
+        }
         final conversation = ServerConversation(
           id: 'aisa_fs_${entry.id}',
           createdAt: entry.timestamp,
-          structured: Structured(
-            parsed.title,
-            parsed.body,
-            emoji: parsed.emoji,
-          ),
+          structured: Structured(title, body, emoji: emoji),
           transcriptSegments: [],
           source: ConversationSource.phone,
           status: ConversationStatus.completed,
@@ -2020,11 +2032,14 @@ _AisaParsed _parseAisaTitleAndEmoji(String text, DateTime timestamp) {
       // タイトルから話者タグ（[自分🧔] 等）が混入した場合は除去
       final titleRaw = parts[0].trim().replaceAll(RegExp(r'^\[[^\]]+\]\s*'), '').trim();
       final title = titleRaw.isNotEmpty ? titleRaw : fallbackTitle;
-      return _AisaParsed(
-        title: title,
-        emoji: parts[1].trim(),
-        body: lines.skip(1).join('\n').trim(),
-      );
+      final body = lines.skip(1).join('\n').trim();
+      // 本文空ガード: Claudeが1行目だけ返してきた場合、本文が空になると
+      // 会話詳細画面で何も表示されなくなる。その場合はフォールバックで全文を本文に採用。
+      if (body.isNotEmpty) {
+        return _AisaParsed(title: title, emoji: parts[1].trim(), body: body);
+      }
+      // タイトル行しか無い → タイトル抽出は諦めて全文を本文にする（文字起こしを失わない）
+      return _AisaParsed(title: fallbackTitle, emoji: '🎙️', body: cleanedText);
     }
   }
   return _AisaParsed(title: fallbackTitle, emoji: '🎙️', body: cleanedText);

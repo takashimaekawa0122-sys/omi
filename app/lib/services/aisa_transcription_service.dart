@@ -108,7 +108,8 @@ class AisaTranscriptionService {
       if (transcript != null && transcript.trim().isNotEmpty) {
         // Firestoreへの保存失敗はログのみ — UIへの表示はFirestore成功・失敗に関係なく行う
         try {
-          await AisaFirestoreService.instance.saveTranscript(transcript);
+          // processAndSaveはClaude校正前のWhisper結果なので body のみ保存
+          await AisaFirestoreService.instance.saveTranscript(transcript, body: transcript);
         } catch (saveError) {
           debugPrint('[AISA] Firestore保存失敗（UIには表示）: $saveError');
           AisaDebugLogger.instance.warning('⚠ Firestore保存失敗（UIには表示）: $saveError');
@@ -160,6 +161,26 @@ class AisaTranscriptionService {
     }
   }
 
+  /// Firestore保存用に Claude 出力をタイトル/絵文字/本文に分解する軽量パーサ。
+  /// Claudeは「タイトル\t絵文字\n本文」形式で返すが、本文が空になるケースに備えて
+  /// body が空なら全文をbodyに採用する。capture_provider._parseAisaTitleAndEmoji と
+  /// 同じ意図だが、UI特有のフォールバック（fallbackTitle）は不要なためここで独自実装する。
+  static ({String? title, String? emoji, String body}) _parseForFirestore(String raw) {
+    final cleaned = _stripF0Markers(raw);
+    final lines = cleaned.split('\n');
+    if (lines.isNotEmpty && lines[0].contains('\t')) {
+      final parts = lines[0].split('\t');
+      if (parts.length >= 2 && parts[0].trim().isNotEmpty) {
+        final titleRaw = parts[0].trim().replaceAll(RegExp(r'^\[[^\]]+\]\s*'), '').trim();
+        final body = lines.skip(1).join('\n').trim();
+        if (body.isNotEmpty) {
+          return (title: titleRaw, emoji: parts[1].trim(), body: body);
+        }
+      }
+    }
+    return (title: null, emoji: null, body: cleaned);
+  }
+
   /// 蓄積済みテキストをClaude校正＋話者分離してFirestoreに保存する
   /// 会話バッファのフラッシュ時に呼ぶ。
   /// Claude校正＋Firestore保存を行い、(校正済みテキスト, FirestoreドキュメントID) を返す
@@ -178,9 +199,16 @@ class AisaTranscriptionService {
         }
       }
       // Firestore保存（docIdをUIの会話IDに使うことで、リロード時の重複を防ぐ）
+      // パース済みフィールド(title/emoji/body)も一緒に保存して、読み込み時の再パース事故を防ぐ
       String? docId;
       try {
-        docId = await AisaFirestoreService.instance.saveTranscript(result);
+        final parsed = _parseForFirestore(result);
+        docId = await AisaFirestoreService.instance.saveTranscript(
+          result,
+          title: parsed.title,
+          emoji: parsed.emoji,
+          body: parsed.body,
+        );
       } catch (e) {
         debugPrint('[AISA] Firestore保存失敗（UIには表示）: $e');
       }
@@ -189,7 +217,11 @@ class AisaTranscriptionService {
       debugPrint('[AISA] Claude校正失敗（生テキストを使用）: $e');
       String? docId;
       try {
-        docId = await AisaFirestoreService.instance.saveTranscript(cleanRawText);
+        // 校正失敗時: 生テキスト全体を body として保存（title/emoji は未設定）
+        docId = await AisaFirestoreService.instance.saveTranscript(
+          cleanRawText,
+          body: cleanRawText,
+        );
       } catch (_) {}
       return (text: cleanRawText, docId: docId);
     } finally {

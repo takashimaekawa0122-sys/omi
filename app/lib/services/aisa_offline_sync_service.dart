@@ -276,7 +276,8 @@ class AisaOfflineSyncService {
           : DateTime.now();
       String? docId;
       try {
-        docId = await AisaFirestoreService.instance.saveTranscript(combined);
+        // オフライン同期はClaude校正を行わないため、combined全体が本文（タイトル/絵文字なし）
+        docId = await AisaFirestoreService.instance.saveTranscript(combined, body: combined);
       } catch (_) {}
       try {
         if (!_transcriptController.isClosed) {
