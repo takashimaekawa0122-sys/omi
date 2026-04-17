@@ -128,7 +128,15 @@ class AisaFirestoreService {
         .collection('entries')
         .add(data);
 
-    AisaDebugLogger.instance.info('Firestore保存: $dateStr (${transcript.length}文字)');
+    AisaDebugLogger.instance.firestore(
+      'Firestore保存: $dateStr (${transcript.length}文字)',
+      context: {
+        'date': dateStr,
+        'docId': docRef.id,
+        'chars': transcript.length,
+        'hasParsed': body != null,
+      },
+    );
     debugPrint('[AISA] Groq文字起こし保存成功: $dateStr id=${docRef.id}');
     return docRef.id;
   }
@@ -189,7 +197,13 @@ class AisaFirestoreService {
     // タイムスタンプでソート（新しい順）
     entries.sort((a, b) => b.timestamp.compareTo(a.timestamp));
 
-    AisaDebugLogger.instance.info('Firestore読み込み: ${entries.length}件 (${days}日分)');
+    AisaDebugLogger.instance.firestore(
+      'Firestore読み込み: ${entries.length}件 (${days}日分)',
+      context: {
+        'entries': entries.length,
+        'days': days,
+      },
+    );
     debugPrint('[AISA load] 読み込み完了: ${entries.length}件');
     return entries;
   }

@@ -1467,23 +1467,52 @@ class CaptureProvider extends ChangeNotifier
         final isRateLimit = msg.contains('429') || msg.toLowerCase().contains('rate limit');
         if (isRateLimit) {
           AisaDebugLogger.instance.error(
-              '🚫 ライブ文字起こしがGroqレート制限で失敗 (429) — オフライン同期と競合中の可能性');
+            '🚫 ライブ文字起こしがGroqレート制限で失敗 (429) — オフライン同期と競合中の可能性',
+            category: AisaLogCategory.groq,
+            context: {
+              'status': 429,
+              'pendingFrames': frames.length,
+              'bufferFrames': _aisaFrameBuffer.length,
+            },
+          );
           // 【フレーム保全】429時は捨てずに次ティックで再挑戦する。
           // ただし無制限に肥大化させないよう上限を設ける（約10分ぶん = 12000フレーム）。
           const maxRetainedFrames = 12000;
           if (_aisaFrameBuffer.length + frames.length <= maxRetainedFrames) {
             // 保全: バッファの先頭に戻す（時系列を維持するため insertAll(0, ...)）
             _aisaFrameBuffer.insertAll(0, frames);
-            AisaDebugLogger.instance.info(
-                '↩ 429のため${frames.length}フレームを保全（バッファ: ${_aisaFrameBuffer.length}）');
+            AisaDebugLogger.instance.live(
+              '↩ 429のため${frames.length}フレームを保全（バッファ: ${_aisaFrameBuffer.length}）',
+              context: {
+                'retained': frames.length,
+                'bufferTotal': _aisaFrameBuffer.length,
+              },
+            );
           } else {
             AisaDebugLogger.instance.warning(
-                '⚠ バッファ上限超過 → ${frames.length}フレームを破棄');
+              '⚠ バッファ上限超過 → ${frames.length}フレームを破棄',
+              category: AisaLogCategory.live,
+              context: {
+                'dropped': frames.length,
+                'bufferTotal': _aisaFrameBuffer.length,
+                'cap': maxRetainedFrames,
+              },
+            );
           }
         } else if (msg.contains('TimeoutException')) {
-          AisaDebugLogger.instance.warning('⏱ ライブ文字起こしタイムアウト: $msg');
+          AisaDebugLogger.instance.warning(
+            '⏱ ライブ文字起こしタイムアウト: $msg',
+            category: AisaLogCategory.live,
+            context: {'errorSnippet': msg.substring(0, msg.length.clamp(0, 120))},
+          );
         } else {
-          AisaDebugLogger.instance.error('❌ ライブ文字起こし失敗: $msg');
+          AisaDebugLogger.instance.log(
+            '❌ ライブ文字起こし失敗: $msg',
+            level: AisaLogLevel.error,
+            category: AisaLogCategory.live,
+            context: {'errorType': e.runtimeType.toString()},
+            stackTrace: StackTrace.current,
+          );
         }
         Logger.debug('[AISA] チャンク処理失敗: $e');
         // チャンク単位の失敗なので無音扱いにはせず、次ティックで新規フレームで再挑戦
@@ -1572,8 +1601,18 @@ class CaptureProvider extends ChangeNotifier
     final rms = sqrt(sumSquares / count);
     // 下流のハルシネーション辞書で典型的な誤認識は引き続きブロックされる。
     const threshold = _aisaVadRmsThreshold;
-    AisaDebugLogger.instance.info('VAD: RMS=${rms.toStringAsFixed(1)} (閾値=$threshold) → ${rms > threshold ? "通過" : "スキップ"}');
-    return rms > threshold;
+    final pass = rms > threshold;
+    AisaDebugLogger.instance.vad(
+      'VAD: RMS=${rms.toStringAsFixed(1)} (閾値=$threshold) → ${pass ? "通過" : "スキップ"}',
+      level: pass ? AisaLogLevel.debug : AisaLogLevel.trace,
+      context: {
+        'rms': rms.toStringAsFixed(1),
+        'threshold': threshold,
+        'samples': count,
+        'pass': pass,
+      },
+    );
+    return pass;
   }
 
   // AISA: 会話ID生成用カウンター（同一ミリ秒での重複IDを防ぐ）
