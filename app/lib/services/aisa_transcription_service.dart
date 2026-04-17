@@ -79,17 +79,25 @@ class AisaTranscriptionService {
   static const double _kMinAvgLogprob = -1.0;
 
   // ──── F0（基本周波数）推定 ────
+  // 日本人の実測値に合わせて調整:
+  //   男性: 平均120Hz、語尾上げで170Hz程度まで → maleの上限を175Hz
+  //   女性: 平均220Hz、抑揚で260Hz程度まで    → femaleの上限を280Hz
+  //   child判定は誤検出が多いので、300Hz超のみchild（大声・裏声もchild判定しない）
+  // また、オクターブエラーで真値の2倍を拾う傾向があるため、最大値も300Hzまでに下げる
   static const double _kF0MinHz = 70.0;
-  static const double _kF0MaxHz = 400.0;
-  static const double _kF0MaleMaxHz = 150.0;   // < 150Hz = male
-  static const double _kF0FemaleMaxHz = 230.0; // 150〜230Hz = female、以上 = child
+  static const double _kF0MaxHz = 320.0;
+  static const double _kF0MaleMaxHz = 175.0;   // < 175Hz = male
+  static const double _kF0FemaleMaxHz = 280.0; // 175〜280Hz = female、以上 = child
   static const int _kF0MaxAnalysisSamples = 8000; // 0.5秒 @ 16kHz
   static const int _kF0MinSamples = 400; // 25ms未満は推定不可
   static const double _kF0MinEnergy = 1000;
-  static const double _kF0MinCorrelation = 0.3;
+  /// 相関が低い場合はF0不明扱いにしてChatに判断を委ねる
+  static const double _kF0MinCorrelation = 0.4; // 0.3→0.4（誤検出を減らす）
+  /// オクターブエラー対策: 候補lag×2の相関がこの割合以上なら倍音（真のlag）を優先
+  static const double _kF0OctavePreferRatio = 0.85;
 
   /// F0マーカー削除用の正規表現（事前コンパイル）
-  static final RegExp _f0MarkerRegex = RegExp(r'\[F=\d+(?:\.\d+)?\|(?:male|female|child)\]');
+  static final RegExp _f0MarkerRegex = RegExp(r'\[F=\d+(?:\.\d+)?\|(?:male|female|child|unknown)\]');
   static final RegExp _multiSpaceRegex = RegExp(r'\s{2,}');
 
   /// 音声ファイルを文字起こししてFirestoreに保存し、テキストを返す
@@ -336,6 +344,14 @@ class AisaTranscriptionService {
         continue;
       }
 
+      // 【重要】セグメント単位でハルシネーション辞書チェック
+      // 連結後の全体チェック（L273）だけだと「ありがとうございました」の連発が素通りする
+      if (_isHallucination(text)) {
+        debugPrint('[AISA VAD] 除外(hallucination): "$text"');
+        skippedNoSpeech++;
+        continue;
+      }
+
       // 音量フィルタ: 極端に小さい音量（ほぼ無音）のみ除外する。
       // 以前は「装着者以外の声」を弾くため閾値を高く設定していたが、
       // 会話相手の声も拾いたいユースケースに合わせて大幅に緩和。
@@ -451,11 +467,14 @@ class AisaTranscriptionService {
     }
     if (energy < _kF0MinEnergy) return -1;
 
+    // 相関値を全lagぶん保存（オクターブエラー補正で後段参照）
+    final corrs = List<double>.filled(maxLag + 1, 0);
     for (int lag = minLag; lag <= maxLag; lag++) {
       double sum = 0;
       for (int i = 0; i < sampleCount - lag; i++) {
         sum += samples[i] * samples[i + lag];
       }
+      corrs[lag] = sum;
       if (sum > maxCorr) {
         maxCorr = sum;
         bestLag = lag;
@@ -467,11 +486,29 @@ class AisaTranscriptionService {
     final normCorr = maxCorr / energy;
     if (normCorr < _kF0MinCorrelation) return -1;
 
+    // オクターブエラー補正: bestLag×2 の相関が maxCorr × 0.85 以上あれば、
+    // bestLagはオクターブエラー（半分のlagを拾っている=倍の周波数）と判定し
+    // lag×2（真のピッチ）を採用する。自己相関が倍音で同等のピークを持つ性質への対策。
+    final doubleLag = bestLag * 2;
+    if (doubleLag <= maxLag && corrs[doubleLag] >= maxCorr * _kF0OctavePreferRatio) {
+      bestLag = doubleLag;
+    }
+    // 3倍音も念のためチェック（女性高音が誤って child に化けるケース）
+    final tripleLag = bestLag * 3 ~/ 2; // さらに上のlagで高相関があるか
+    if (tripleLag <= maxLag && corrs[tripleLag] >= corrs[bestLag] * _kF0OctavePreferRatio) {
+      bestLag = tripleLag;
+    }
+
     return sampleRate / bestLag;
   }
 
   /// F0から性別・年齢カテゴリを判定
+  /// 境界付近（灰色ゾーン）は unknown を返し、Claude側で 🙂 を付けさせる
   static String _categorizeF0(double f0) {
+    // 灰色ゾーン: 男女境界（165-185Hz）と女性/子供境界（270-300Hz）は
+    // F0推定誤差のほうが大きいため判定を避ける
+    if (f0 >= 165 && f0 <= 185) return 'unknown';
+    if (f0 >= 270 && f0 <= 300) return 'unknown';
     if (f0 < _kF0MaleMaxHz) return 'male';
     if (f0 < _kF0FemaleMaxHz) return 'female';
     return 'child';
@@ -792,6 +829,12 @@ class AisaTranscriptionService {
 ・内容の追加・言い換えは一切禁止
 ・正しい可能性があるものは修正しない（迷ったら元のままにする）
 
+【重複統合ルール（重要）】
+・同じフレーズが連続または近接して3回以上繰り返される場合は1つにまとめる（Whisperハルシネーションの典型パターン）
+・「ありがとうございました」「はい」「そうですね」等の短い相槌が不自然に連続する場合は削除または1回に集約
+・話者タグが異なっても内容が完全に同じ繰り返しは1つに集約
+・F0マーカーの値が多少違っても、同一人物の同一発話が繰り返されている場合は統合する
+
 【TV/動画/ゲーム音声の削除ルール（厳格）】
 以下に該当する内容は全文まるごと削除し、出力に含めない：
 ・ニュース/ナレーション口調（「〜によりますと」「〜だということです」「〜と発表しました」）
@@ -815,8 +858,10 @@ class AisaTranscriptionService {
 F0マーカーに基づき、話者タグに以下の絵文字を1つだけ付ける：
   ・male    → 🧔（成人男性）
   ・female  → 👩（成人女性）
-  ・child   → 👶（子供）
+  ・child   → 👶（子供・確信がある場合のみ）
+  ・unknown → 🙂（境界で判定困難）
   ・F0不明  → 🙂（性別不明）
+【注意】childと判定される誤検出が多い傾向にある。成人男性の大きな声・語尾上げ・成人女性の感情表現はF0が上がり child に化けやすい。文脈から子供の発話と明確に判断できる場合（内容・話し方）のみ 👶 を使い、迷ったら 🙂 か 🧔/👩 を使うこと。
 例：
   [自分🧔] （装着者が男性の場合）
   [自分👩] （装着者が女性の場合）
