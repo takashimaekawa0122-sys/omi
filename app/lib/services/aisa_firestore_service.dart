@@ -89,12 +89,12 @@ class AisaFirestoreService {
     }
   }
 
-  Future<void> saveTranscript(String transcript) async {
+  Future<String?> saveTranscript(String transcript) async {
     if (!_initialized || _firestore == null) {
       AisaDebugLogger.instance.warning('⚠ Firestore未初期化 - 保存スキップ');
-      return;
+      return null;
     }
-    if (transcript.trim().isEmpty) return;
+    if (transcript.trim().isEmpty) return null;
 
     final now = DateTime.now();
     final dateStr =
@@ -102,7 +102,7 @@ class AisaFirestoreService {
         '${now.month.toString().padLeft(2, '0')}-'
         '${now.day.toString().padLeft(2, '0')}';
 
-    await _firestore!
+    final docRef = await _firestore!
         .collection('sessions')
         .doc(dateStr)
         .collection('entries')
@@ -114,7 +114,8 @@ class AisaFirestoreService {
     });
 
     AisaDebugLogger.instance.info('Firestore保存: $dateStr (${transcript.length}文字)');
-    debugPrint('[AISA] Groq文字起こし保存成功: $dateStr');
+    debugPrint('[AISA] Groq文字起こし保存成功: $dateStr id=${docRef.id}');
+    return docRef.id;
   }
 
   /// Firestoreから今日の会話を読み込む（起動時に呼び出し）

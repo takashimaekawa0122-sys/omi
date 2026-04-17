@@ -18,11 +18,66 @@ class AisaTranscriptionService {
   AisaTranscriptionService._();
   static final AisaTranscriptionService instance = AisaTranscriptionService._();
 
+  // ライブ優先制御: オフライン同期がライブ会話のAPI呼び出しに割り込まないようにする
+  int _liveInFlight = 0;
+  DateTime? _lastLiveCallAt;
+
+  /// ライブ会話が直近にAPI呼び出しをしたか（オフライン同期側で待機判定に使う）
+  /// 進行中 or 5秒以内に呼び出しがあった場合 true
+  bool get isLiveActive {
+    if (_liveInFlight > 0) return true;
+    final last = _lastLiveCallAt;
+    if (last == null) return false;
+    return DateTime.now().difference(last) < _liveCooldown;
+  }
+
+  /// オフライン同期側で使用: ライブが静かになるまで待機（最大waitLimit秒）
+  Future<void> waitForLiveQuiet({Duration waitLimit = _liveWaitDefaultLimit}) async {
+    final deadline = DateTime.now().add(waitLimit);
+    while (isLiveActive && DateTime.now().isBefore(deadline)) {
+      await Future.delayed(_liveWaitPollInterval);
+    }
+  }
+
+  // ──── エンドポイントとAPIキー ────
   static const _endpoint = 'https://api.groq.com/openai/v1/audio/transcriptions';
   static const _groqApiKey = String.fromEnvironment('GROQ_API_KEY');
 
   static const _claudeEndpoint = 'https://api.anthropic.com/v1/messages';
   static const _anthropicApiKey = String.fromEnvironment('ANTHROPIC_API_KEY');
+
+  // ──── ライブ優先制御 ────
+  /// ライブ呼び出しのクールダウン: 最後のライブ呼び出しから何秒までを "active" 扱いにするか
+  static const Duration _liveCooldown = Duration(seconds: 5);
+  /// ライブ待機の最大時間（永遠に待ち続けないためのフェイルセーフ）
+  static const Duration _liveWaitDefaultLimit = Duration(seconds: 30);
+  static const Duration _liveWaitPollInterval = Duration(milliseconds: 500);
+
+  // ──── 音量・音声判定しきい値 ────
+  /// 無音判定（WAV全体）: これ未満はGroqにすら送らない
+  static const double _kSilentWavRms = 50.0;
+  /// セグメント単位の無音除外（会話相手の声も拾うため緩い設定）
+  static const double _kSegmentQuietRms = 80.0;
+  /// Whisper no_speech_prob: この値以上は非音声として除外
+  static const double _kNoSpeechProbThreshold = 0.6;
+  /// Whisper compression_ratio: この値超はループハルシネーション
+  static const double _kCompressionRatioThreshold = 2.8;
+  /// Whisper avg_logprob: この値未満は不明瞭として除外
+  static const double _kMinAvgLogprob = -1.0;
+
+  // ──── F0（基本周波数）推定 ────
+  static const double _kF0MinHz = 70.0;
+  static const double _kF0MaxHz = 400.0;
+  static const double _kF0MaleMaxHz = 150.0;   // < 150Hz = male
+  static const double _kF0FemaleMaxHz = 230.0; // 150〜230Hz = female、以上 = child
+  static const int _kF0MaxAnalysisSamples = 8000; // 0.5秒 @ 16kHz
+  static const int _kF0MinSamples = 400; // 25ms未満は推定不可
+  static const double _kF0MinEnergy = 1000;
+  static const double _kF0MinCorrelation = 0.3;
+
+  /// F0マーカー削除用の正規表現（事前コンパイル）
+  static final RegExp _f0MarkerRegex = RegExp(r'\[F=\d+(?:\.\d+)?\|(?:male|female|child)\]');
+  static final RegExp _multiSpaceRegex = RegExp(r'\s{2,}');
 
   /// 音声ファイルを文字起こししてFirestoreに保存し、テキストを返す
   /// Firestore保存に失敗してもトランスクリプトはUIに返す（保存失敗で表示も消えるバグを修正）
@@ -66,15 +121,26 @@ class AisaTranscriptionService {
   /// チャンク単位の軽量処理。会話バッファリングの各ティックで使う。
   /// WAVファイルの削除は呼び出し元の責任。
   Future<String?> transcribeChunkOnly(File wavFile, {String? previousContext}) async {
-    return await _transcribe(wavFile, previousContext: previousContext, skipClaude: true);
+    _liveInFlight++;
+    try {
+      final result = await _transcribe(wavFile, previousContext: previousContext, skipClaude: true);
+      _lastLiveCallAt = DateTime.now();
+      return result;
+    } finally {
+      _liveInFlight--;
+    }
   }
 
   /// 蓄積済みテキストをClaude校正＋話者分離してFirestoreに保存する
   /// 会話バッファのフラッシュ時に呼ぶ。
-  Future<String?> correctAndSave(String rawText) async {
+  /// Claude校正＋Firestore保存を行い、(校正済みテキスト, FirestoreドキュメントID) を返す
+  Future<({String text, String? docId})?> correctAndSave(String rawText) async {
     if (rawText.trim().isEmpty) return null;
+    _liveInFlight++;
+    // F0マーカーを剥がしたクリーンテキストをフォールバックに使う
+    final cleanRawText = _stripF0Markers(rawText);
     try {
-      String result = rawText;
+      String result = cleanRawText;
       if (_anthropicApiKey.isNotEmpty) {
         AisaDebugLogger.instance.info('Claude校正: 開始 (${rawText.length}文字)');
         final corrected = await _correctWithClaude(rawText);
@@ -82,20 +148,24 @@ class AisaTranscriptionService {
           result = corrected;
         }
       }
-      // Firestore保存
+      // Firestore保存（docIdをUIの会話IDに使うことで、リロード時の重複を防ぐ）
+      String? docId;
       try {
-        await AisaFirestoreService.instance.saveTranscript(result);
+        docId = await AisaFirestoreService.instance.saveTranscript(result);
       } catch (e) {
         debugPrint('[AISA] Firestore保存失敗（UIには表示）: $e');
       }
-      return result;
+      return (text: result, docId: docId);
     } catch (e) {
       debugPrint('[AISA] Claude校正失敗（生テキストを使用）: $e');
-      // 校正失敗時は生テキストをそのまま保存
+      String? docId;
       try {
-        await AisaFirestoreService.instance.saveTranscript(rawText);
+        docId = await AisaFirestoreService.instance.saveTranscript(cleanRawText);
       } catch (_) {}
-      return rawText;
+      return (text: cleanRawText, docId: docId);
+    } finally {
+      _lastLiveCallAt = DateTime.now();
+      _liveInFlight--;
     }
   }
 
@@ -132,7 +202,9 @@ class AisaTranscriptionService {
     // ペンダント（近距離マイク）の話者の声に集中するよう誘導
     // previousContextがある場合は直前チャンクの末尾テキストを付加して文脈を提供する
     // （文の途中切れ防止 + 同音異義語の文脈補助）
-    final basePrompt = 'これはペンダント型マイクで録音した音声です。句読点を含めて正確に文字起こしします。背景音やノイズは無視してください。';
+    // Whisperプロンプト: 装着者と会話相手の両方を正確に拾うよう指示
+    // 「近距離の話者に集中」「背景音は無視」と書くとWhisperが相手の声まで無視してしまうので外した。
+    final basePrompt = 'これは日本語の日常会話の録音です。装着者本人と会話相手の両方の発話を、句読点を含めて正確に文字起こししてください。';
     if (previousContext != null && previousContext.isNotEmpty) {
       // Whisperのpromptは最大224トークン。末尾200文字を渡して文脈を与える
       final tail = previousContext.length > 200 ? previousContext.substring(previousContext.length - 200) : previousContext;
@@ -227,38 +299,52 @@ class AisaTranscriptionService {
       final text = (seg['text'] as String?)?.trim() ?? '';
       final compressionRatio = (seg['compression_ratio'] as num?)?.toDouble() ?? 1.0;
 
-      if (noSpeechProb >= 0.6) {
+      if (noSpeechProb >= _kNoSpeechProbThreshold) {
         debugPrint('[AISA VAD] 除外(no_speech=$noSpeechProb): "$text"');
         skippedNoSpeech++;
         continue;
       }
-      if (compressionRatio > 2.8) {
+      if (compressionRatio > _kCompressionRatioThreshold) {
         debugPrint('[AISA VAD] 除外(compression=$compressionRatio): "$text"');
         skippedNoSpeech++;
         continue;
       }
-      if (avgLogprob < -1.0) {
+      if (avgLogprob < _kMinAvgLogprob) {
         debugPrint('[AISA VAD] 除外(logprob=$avgLogprob): "$text"');
         skippedLowConf++;
         continue;
       }
 
-      // 音量フィルタ: セグメントの時間範囲のRMSを計算し、小さい声（＝他人・遠方）を除外
-      // ペンダントマイクは装着者の声が大きく、他人やTVの声は小さい
+      // 音量フィルタ: 極端に小さい音量（ほぼ無音）のみ除外する。
+      // 以前は「装着者以外の声」を弾くため閾値を高く設定していたが、
+      // 会話相手の声も拾いたいユースケースに合わせて大幅に緩和。
+      // Whisperのno_speech_prob/avg_logprob/compression_ratioと
+      // ハルシネーション辞書で雑音・BGM・誤認識は別途除外される。
       if (pcmData != null) {
         final segStart = (seg['start'] as num?)?.toDouble() ?? 0.0;
         final segEnd = (seg['end'] as num?)?.toDouble() ?? 0.0;
         final rms = _calculateSegmentRms(pcmData, sampleRate, segStart, segEnd);
-        // RMS < 800: 遠方の声と判定（装着者の通常の声は 2000〜10000）
-        // 閾値800は小声でも拾えるが、TV・他人の声（通常300〜700）を除外する
-        if (rms >= 0 && rms < 800) {
+        // RMS < _kSegmentQuietRms: ほぼ完全な無音セグメントのみ除外（通常の会話相手は 100〜600）
+        if (rms >= 0 && rms < _kSegmentQuietRms) {
           debugPrint('[AISA VAD] 除外(quiet rms=$rms): "$text"');
           skippedQuiet++;
           continue;
         }
       }
 
-      buffer.write(text);
+      // F0（基本周波数）推定 → 性別・年齢マーカーを付加
+      // Claudeに話者属性のヒントとして渡し、出力時に性別/年齢絵文字を付けてもらう
+      String marker = '';
+      if (pcmData != null) {
+        final segStart = (seg['start'] as num?)?.toDouble() ?? 0.0;
+        final segEnd = (seg['end'] as num?)?.toDouble() ?? 0.0;
+        final f0 = _estimateF0(pcmData, sampleRate, segStart, segEnd);
+        if (f0 > 0) {
+          final category = _categorizeF0(f0);
+          marker = '[F=${f0.toStringAsFixed(0)}|$category]';
+        }
+      }
+      buffer.write('$marker$text ');
       kept++;
     }
 
@@ -303,6 +389,73 @@ class AisaTranscriptionService {
     return sqrt(sumSquares / count);
   }
 
+  /// 自己相関による基本周波数（F0）推定
+  /// 戻り値: Hz（70〜400Hz 範囲外または推定不可の場合は -1）
+  /// 男性: 85〜180Hz / 女性: 165〜255Hz / 子供: 250〜400Hz
+  static double _estimateF0(Uint8List pcmData, int sampleRate, double startSec, double endSec) {
+    final startSample = (startSec * sampleRate).toInt();
+    final endSample = (endSec * sampleRate).toInt();
+    final startByte = startSample * 2;
+    var endByte = endSample * 2;
+    if (endByte > pcmData.length) endByte = pcmData.length;
+    if (startByte >= endByte) return -1;
+
+    // セグメントが長すぎる場合は先頭から最大N秒だけ解析（パフォーマンス）
+    final availableSamples = (endByte - startByte) ~/ 2;
+    final sampleCount = availableSamples > _kF0MaxAnalysisSamples
+        ? _kF0MaxAnalysisSamples
+        : availableSamples;
+    if (sampleCount < _kF0MinSamples) return -1;
+
+    // 16bit signed → double配列に変換
+    final samples = List<double>.filled(sampleCount, 0);
+    for (int i = 0; i < sampleCount; i++) {
+      int s = pcmData[startByte + i * 2] | (pcmData[startByte + i * 2 + 1] << 8);
+      if (s >= 32768) s -= 65536;
+      samples[i] = s.toDouble();
+    }
+
+    // 自己相関でF0推定
+    // 探索範囲: _kF0MinHz〜_kF0MaxHz → lag = sampleRate/maxHz 〜 sampleRate/minHz
+    final minLag = (sampleRate / _kF0MaxHz).toInt();
+    final maxLag = (sampleRate / _kF0MinHz).toInt();
+    if (maxLag >= sampleCount) return -1;
+
+    double maxCorr = 0;
+    int bestLag = 0;
+    // エネルギー基準（ノイズ/無声で低相関を弾く）
+    double energy = 0;
+    for (int i = 0; i < sampleCount; i++) {
+      energy += samples[i] * samples[i];
+    }
+    if (energy < _kF0MinEnergy) return -1;
+
+    for (int lag = minLag; lag <= maxLag; lag++) {
+      double sum = 0;
+      for (int i = 0; i < sampleCount - lag; i++) {
+        sum += samples[i] * samples[i + lag];
+      }
+      if (sum > maxCorr) {
+        maxCorr = sum;
+        bestLag = lag;
+      }
+    }
+
+    if (bestLag == 0) return -1;
+    // 正規化相関が低すぎるなら無声・雑音扱い
+    final normCorr = maxCorr / energy;
+    if (normCorr < _kF0MinCorrelation) return -1;
+
+    return sampleRate / bestLag;
+  }
+
+  /// F0から性別・年齢カテゴリを判定
+  static String _categorizeF0(double f0) {
+    if (f0 < _kF0MaleMaxHz) return 'male';
+    if (f0 < _kF0FemaleMaxHz) return 'female';
+    return 'child';
+  }
+
   /// Whisperが無音・ノイズから生成する定型ハルシネーションを検出する
   /// 実際に発話していないのにWhisperが勝手に生成するフレーズのブロックリスト
   /// 外部からもハルシネーション判定を利用可能にする（オフライン同期等）
@@ -310,8 +463,21 @@ class AisaTranscriptionService {
 
   static bool _isHallucination(String text) {
     final t = text.trim();
-    // 短すぎるテキスト（3文字以下）は意味のある発話ではない可能性が高い
-    if (t.length <= 3) return true;
+    // 1文字のみはノイズ扱い
+    if (t.length <= 1) return true;
+    // 2〜3文字の短い発話は、相槌・返事として実在するものだけ許可する
+    // （Whisperがノイズから生成する無意味な2〜3文字を除外しつつ、正当な返事を残す）
+    if (t.length <= 3) {
+      const validShortReplies = {
+        'はい', 'いえ', 'うん', 'ええ', 'ああ', 'おお', 'へえ', 'ふむ', 'そう', 'なに',
+        'なぜ', 'やあ', 'まあ', 'ねえ', 'あの', 'その', 'この', 'どう', 'なる',
+        'はあ', 'うーん', 'えー', 'あー', 'おー', 'ほう', 'おい', 'ほら', 'それ',
+        'いいえ', 'はいよ', 'そうだ', 'そうね', 'わかった',
+        'OK', 'ok', 'Ok', 'はいはい',
+      };
+      final stripped = t.replaceAll(RegExp(r'[。、！？.!?\s]'), '');
+      if (!validShortReplies.contains(stripped)) return true;
+    }
 
     // 同じフレーズの繰り返し検出（ハルシネーションの典型パターン）
     // 例: 「ペンダント音ペンダント音ペンダント音...」
@@ -323,22 +489,83 @@ class AisaTranscriptionService {
 
     // 完全一致・末尾句読点バリエーション用の定型ハルシネーション
     const exactHallucinations = [
+      // 視聴お礼系
       'ご視聴ありがとうございました',
       'ご視聴ありがとうございます',
+      'ご視聴いただきありがとうございました',
+      'ご視聴いただきありがとうございます',
+      '最後までご視聴ありがとうございました',
+      '最後までご視聴いただきありがとうございました',
+      '最後までお聞きいただきありがとうございました',
+      'ご清聴ありがとうございました',
+      'ご清聴ありがとうございます',
+      '字幕視聴ありがとうございました',
+      'ご覧いただきありがとうございました',
+      'お聞きいただきありがとうございました',
+      // チャンネル系
       'チャンネル登録お願いします',
       'チャンネル登録よろしくお願いします',
+      'チャンネル登録と高評価お願いします',
+      '高評価とチャンネル登録お願いします',
+      '高評価ボタンをお願いします',
+      'いいねとチャンネル登録お願いします',
+      'いいねボタンをお願いします',
+      'ベルマークの通知をオンにしてください',
+      '通知をオンにしてください',
+      // 次回予告系
+      '次回もお楽しみに',
+      '次回をお楽しみに',
+      'お楽しみに',
+      'また次回',
+      'また次回お会いしましょう',
+      'また来週',
+      'また今度',
+      'それではまた',
+      'それではまた次回',
+      'また次回の動画でお会いしましょう',
+      // 挨拶・締め
       'お疲れ様でした',
+      'おつかれさまでした',
       'おやすみなさい',
       'ありがとうございました',
-      '字幕視聴ありがとうございました',
-      'ご清聴ありがとうございました',
-      '最後までご視聴ありがとうございました',
+      'ありがとうございます',
+      'よろしくお願いします',
+      'さようなら',
+      'またね',
+      'バイバイ',
+      'ばいばい',
+      // 動画・制作系
+      '提供',
+      '制作',
+      '協力',
+      '字幕',
+      '翻訳',
+      '配信',
+      'BGM',
+      '音楽',
+      '効果音',
+      // ネタ系
       'いい加減にしろ',
+      // 英語圏Whisperハルシネーション
       'Thanks for watching',
+      'Thanks for watching!',
       'Thank you for watching',
+      'Thank you for watching!',
+      'Thank you.',
+      'Thank you',
+      'Please subscribe',
       'Subscribe',
+      'Like and subscribe',
+      'See you next time',
+      'See you',
+      'Bye',
       'Bye bye',
       'Goodbye',
+      'Good night',
+      'you',
+      'You',
+      '.',
+      '。',
     ];
     for (final h in exactHallucinations) {
       if (t == h || t == '$h。' || t == '$h！' || t == '$h.') return true;
@@ -346,6 +573,7 @@ class AisaTranscriptionService {
 
     // プロンプトエコー系・ノイズ系は部分一致で判定
     const substringHallucinations = [
+      // プロンプトエコー（Whisperがプロンプト自体を復唱する現象）
       'ペンダント型マイク',
       'ペンダントマイク',
       'ペンダントの音声',
@@ -354,6 +582,7 @@ class AisaTranscriptionService {
       '句読点を含めて正確に文字起こし',
       '背景音やノイズは無視',
       'マイクに近い話者',
+      // Claudeの応答系（校正失敗時の応答パターン）
       '音声を聞いてみましょう',
       '音声を聞き取ると',
       '音声が聞こえます',
@@ -363,6 +592,105 @@ class AisaTranscriptionService {
       '校正してほしい',
       'テキストが記載されていません',
       'テキストをご提供',
+      '提供されたテキスト',
+      '以下のように校正',
+      '校正結果',
+      '申し訳ございません',
+      '申し訳ありません',
+      // YouTube系ハルシネーション
+      'チャンネル登録',
+      '高評価',
+      'グッドボタン',
+      '低評価',
+      'ベルマーク',
+      'コメント欄',
+      '概要欄',
+      '動画をご覧',
+      '動画を最後まで',
+      '次回の動画',
+      'ご視聴',
+      'ご清聴',
+      '最後までお付き合い',
+      'ライブ配信',
+      '生放送',
+      'プレミア公開',
+      'YouTube',
+      'Youtube',
+      'youtube',
+      // TV・メディア系
+      'MBS毎日放送',
+      'TBS',
+      'フジテレビ',
+      '日本テレビ',
+      'テレビ朝日',
+      'テレビ東京',
+      'NHK',
+      '提供は',
+      'ご覧のスポンサー',
+      'この番組は',
+      '番組をお送り',
+      '続きはCMの後',
+      'コマーシャル',
+      'コマーシャルの後',
+      // アニメ・ドラマ系
+      '次回予告',
+      '第1話',
+      '第一話',
+      '最終回',
+      'オープニング',
+      'エンディング',
+      'オープニングテーマ',
+      'エンディングテーマ',
+      // その他の典型Whisperハルシネーション
+      '音楽が流れています',
+      '音楽が流れる',
+      'BGMが流れ',
+      '拍手',
+      '歓声',
+      '笑い声',
+      '沈黙',
+      '無音',
+      // TVナレーション・ニュース口調
+      'によりますと',
+      'だということです',
+      'と発表しました',
+      'ことがわかりました',
+      'ということです',
+      'お送りしました',
+      'お送りいたしました',
+      'リスナーの皆さん',
+      'メッセージ募集',
+      '番組をお送り',
+      'ご覧のスポンサー',
+      'この番組は',
+      '続きはCMの後',
+      '続いては',
+      'さて続いては',
+      'お伝えしました',
+      '中継をお伝え',
+      'スタジオからお伝え',
+      'レポーターの',
+      'コメンテーターの',
+      // ゲーム実況
+      'レベルアップしました',
+      'HPが',
+      'MPが',
+      'やられた',
+      'クリアしました',
+      // ドラマ/アニメ特有
+      'すいーっ',
+      'ぎゃああ',
+      'うわあああ',
+      // 英語系ハルシネーション
+      'Thanks for watching',
+      'Thank you for watching',
+      'Please subscribe',
+      'Don\'t forget to subscribe',
+      'Like and subscribe',
+      'See you next',
+      'See you in the next',
+      'Until next time',
+      'this video',
     ];
     for (final h in substringHallucinations) {
       if (t.contains(h)) return true;
@@ -414,44 +742,77 @@ class AisaTranscriptionService {
   /// ハルシネーション防止のため:
   /// - 「修正後のテキストのみ返す」と明示し余計な説明を排除
   /// - 「正しい可能性があるものは修正しない」と保守的な姿勢を指示
+  /// F0マーカー `[F=180|female]` をテキストから除去する（UI表示の保険用に公開）
+  static String stripF0Markers(String text) => _stripF0Markers(text);
+
+  static String _stripF0Markers(String text) {
+    return text
+        .replaceAll(_f0MarkerRegex, '')
+        .replaceAll(_multiSpaceRegex, ' ')
+        .trim();
+  }
+
   Future<String?> _correctWithClaude(String whisperText) async {
+    // Claude失敗時のフォールバックに使う: F0マーカーを剥がした素のテキスト
+    final fallbackText = _stripF0Markers(whisperText);
     try {
       const prompt = '''あなたは日本語音声認識の校正＆話者分離ツールです。
 以下の音声認識結果を校正し、話者を推定してください。
-この音声はペンダント型マイクで録音されたものです。主に「装着者本人」の発話ですが、会話相手の発言も含まれる場合があります。
+この音声はペンダント型マイクで録音されたものです。主に「装着者本人」の発話ですが、会話相手・周囲のTV/動画音声も含まれる場合があります。
+
+入力テキストの各セグメント先頭には F0（基本周波数）解析結果が [F=値|カテゴリ] 形式で付与されています：
+  ・F=100前後 / male    → 男性
+  ・F=200前後 / female  → 女性
+  ・F=300前後 / child   → 子供
+このF0マーカーは削除し、話者タグの絵文字選択の参考に使ってください。
 
 【校正ルール】
 ・文脈から明らかに誤っている漢字・同音異義語のみ修正
-・内容の追加・削除・言い換えは一切禁止
+・内容の追加・言い換えは一切禁止
 ・正しい可能性があるものは修正しない（迷ったら元のままにする）
-・アニメ・動画・テレビ・YouTubeのセリフやナレーションと思われる内容は丸ごと削除する（装着者本人の発話ではないため）
+
+【TV/動画/ゲーム音声の削除ルール（厳格）】
+以下に該当する内容は全文まるごと削除し、出力に含めない：
+・ニュース/ナレーション口調（「〜によりますと」「〜だということです」「〜と発表しました」）
+・ドラマ/アニメのセリフ（感情的な演技口調、擬音語、叫び声）
+・CM/番組宣伝（「続きはCMの後」「ご覧のスポンサー」「次回予告」「次週」）
+・YouTube系フレーズ（「ご視聴」「チャンネル登録」「高評価」「概要欄」「ベル通知」）
+・ラジオ系フレーズ（「リスナーの皆さん」「お送りするのは」「メッセージ募集」）
+・ゲーム実況特有表現（「HP」「MP」「レベルアップ」が頻出、実況口調）
+・BGMに乗せたナレーション、明らかに脚本じみた言い回し
+・1人で長く滔々と語り続ける（通常の会話ではない）
+判断に迷う場合：装着者本人が質問や相槌を打っていなければTV音声の可能性が高い → 削除
 
 【話者分離ルール】
-・発言の文脈（質問↔回答、指示↔了承、話題の切り替え）から話者を推定する
-・装着者本人は常に [自分] と表記する
-・相手の名前が会話中に出てきた場合（例：「田中さん、これお願い」）、その相手の発言は [田中] のように名前で表記する
-・名前の検出方法：
-  - 「〇〇さん」「〇〇くん」「〇〇ちゃん」「〇〇先生」など敬称付きで呼びかけている場合 → 〇〇が相手の名前
-  - 「〇〇、これやって」のように名前で直接呼びかけている場合も同様
-  - 複数の相手がいる場合は、それぞれの名前で区別する（[田中] [佐藤] など）
-・名前が分からない相手は [相手] と表記する
-・判断基準：
-  - 質問・依頼・指示を出す側 → 多くの場合 [自分]（ペンダント装着者が主導権を持つことが多い）
-  - 応答・返事・報告する側 → 多くの場合 [相手] または [名前]
-  - 独り言・メモ・つぶやき → [自分]
-・話者が不明な場合は [自分] とする（ペンダントマイクは装着者の声を最も拾うため）
-・1人で話しているだけの場合は、無理に分離せず全て [自分] とする
+・装着者本人は [自分] と表記（性別絵文字付き、後述）
+・相手の名前が分かれば [田中👩] のように名前＋絵文字で表記
+・名前が分からない相手は [相手🧔] のように属性絵文字のみ
+・複数の相手は F0の違いで区別する
+・話者が不明な場合は [自分🧔] とする（ペンダントマイクは装着者の声が最も多い）
+
+【性別・年齢絵文字マッピング】
+F0マーカーに基づき、話者タグに以下の絵文字を1つだけ付ける：
+  ・male    → 🧔（成人男性）
+  ・female  → 👩（成人女性）
+  ・child   → 👶（子供）
+  ・F0不明  → 🙂（性別不明）
+例：
+  [自分🧔] （装着者が男性の場合）
+  [自分👩] （装着者が女性の場合）
+  [田中👩] （田中さんが女性の場合）
+  [相手🧔] （名前不明の男性相手）
+  [子供👶] （子供の発話）
 
 【出力形式】
-1行目: 会話内容を表す短いタイトル（10文字以内）と、内容にふさわしい絵文字1つをタブ区切りで出力
+1行目: 会話内容を表す短いタイトル（10文字以内）とタブ区切りで絵文字1つ
 例: 打ち合わせ\t💼
-例: 買い物リスト\t🛒
-例: 雑談\t💬
-2行目以降: 話者タグ付きテキスト
-[自分] テキスト
-[田中] テキスト（名前が判明している場合）
-[相手] テキスト（名前が不明な場合）
-※各発言を改行で区切る。説明・コメントは不要。
+例: 買い物\t🛒
+例: 家族との雑談\t🏠
+2行目以降: 話者タグ付きテキスト（各発言を改行区切り、説明不要、F0マーカーは削除）
+[自分🧔] テキスト
+[田中👩] テキスト
+[相手🧔] テキスト
+[子供👶] テキスト
 
 【音声認識テキスト】
 ''';
@@ -475,7 +836,7 @@ class AisaTranscriptionService {
 
       if (response.statusCode != 200) {
         debugPrint('[AISA Claude] 校正失敗 ${response.statusCode}: ${response.body}');
-        return whisperText; // 失敗時はWhisper結果をそのまま返す
+        return fallbackText; // 失敗時はF0マーカー除去済みWhisper結果を返す
       }
 
       final json = jsonDecode(response.body) as Map<String, dynamic>;
@@ -484,10 +845,11 @@ class AisaTranscriptionService {
           .firstWhere((c) => c['type'] == 'text', orElse: () => {})['text'] as String?;
 
       if (corrected == null || corrected.trim().isEmpty) {
-        return whisperText;
+        return fallbackText;
       }
 
-      final result = corrected.trim();
+      // F0マーカー残留ガード: Claudeが削除し忘れた場合の保険
+      final result = _stripF0Markers(corrected);
 
       // Claude校正後のテキストもハルシネーションチェック
       // Claudeが「テキストが記載されていません」等の応答を返すケースを捕捉
@@ -500,7 +862,7 @@ class AisaTranscriptionService {
       // 話者タグ「[自分] 」「[相手] 」が行ごとに付くため、元テキストの3倍まで許容する
       if (result.length > whisperText.length * 3 + 50) {
         AisaDebugLogger.instance.warning('⚠ Claude校正が過剰に長い → Whisper結果を使用 (${whisperText.length}→${result.length}文字)');
-        return whisperText;
+        return fallbackText;
       }
 
       if (result != whisperText) {
@@ -513,7 +875,7 @@ class AisaTranscriptionService {
     } catch (e) {
       AisaDebugLogger.instance.warning('⚠ Claude校正エラー (Whisper結果を使用): $e');
       debugPrint('[AISA Claude] 校正エラー（Whisper結果を使用）: $e');
-      return whisperText; // エラー時はWhisper結果をそのまま返す
+      return fallbackText; // エラー時はF0マーカー除去済みWhisper結果を返す
     }
   }
 
@@ -547,10 +909,10 @@ class AisaTranscriptionService {
       }
 
       final rmsValue = count > 0 ? sqrt(sumSquares / count) : 0.0;
-      final isSilent = rmsValue < 50;
+      final isSilent = rmsValue < _kSilentWavRms;
 
       if (isSilent) {
-        debugPrint('[AISA VAD] 無音判定: RMS=${rmsValue.toStringAsFixed(0)} (閾値: 50)');
+        debugPrint('[AISA VAD] 無音判定: RMS=${rmsValue.toStringAsFixed(0)} (閾値: $_kSilentWavRms)');
       }
       return isSilent;
     } catch (e) {

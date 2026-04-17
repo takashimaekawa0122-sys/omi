@@ -709,6 +709,16 @@ class ConversationProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// AISA専用: 指定IDの会話をローカルリストから削除し、UIを更新する
+  /// （仮表示→最終版の置換で、ID変更を伴う差し替え時に使う）
+  void removeAisaConversationLocally(String id) {
+    conversations.removeWhere((c) => c.id == id);
+    for (final list in groupedConversations.values) {
+      list.removeWhere((c) => c.id == id);
+    }
+    notifyListeners();
+  }
+
   void upsertConversation(ServerConversation conversation) {
     int idx = conversations.indexWhere((m) => m.id == conversation.id);
     if (idx < 0) {

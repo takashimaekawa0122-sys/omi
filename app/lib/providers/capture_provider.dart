@@ -128,8 +128,11 @@ class CaptureProvider extends ChangeNotifier
   // AISA: 会話バッファリング制御
   DateTime? _aisaLastVoiceAt; // 最後に音声を検出した時刻
   int _aisaSilentTicks = 0; // 連続無音ティック数（5秒×N）
-  static const int _aisaSilenceThreshold = 3; // 3ティック（15秒）無音で会話の区切りと判定
+  static const int _aisaSilenceThreshold = 2; // 2ティック（10秒）無音で会話の区切りと判定
   static const int _aisaMaxBufferTicks = 36; // 最大36ティック（180秒=3分）でフラッシュ
+  // VAD閾値: 会話相手の声（遠方・RMS 100〜400）も拾えるように大幅に緩和。
+  // ほぼ完全な無音のみスキップし、あとはWhisperのno_speech_prob判定に委ねる。
+  static const double _aisaVadRmsThreshold = 100.0;
   int _aisaBufferTicks = 0; // 現在のバッファ蓄積ティック数
   // AISA: タイマーとライフサイクル呼び出しの再入防止フラグ
   // Groq(2〜6秒) + Claude(3〜5秒) でティック処理が10秒以上かかることがあり、
@@ -138,10 +141,11 @@ class CaptureProvider extends ChangeNotifier
   bool _aisaFlushing = false;
   final List<List<int>> _aisaPendingFrames = []; // 蓄積中のフレーム
   String _aisaAccumulatedText = ''; // 蓄積中のテキスト（複数チャンクをまとめる）
+  String? _aisaPendingConversationId; // 仮表示中の会話ID（Groqチャンク蓄積中のUI即時表示用）
 
   // AISA: オフライン同期トランスクリプトのバッファ
   // conversationProvider が未初期化の場合はここに蓄積し、初期化後にまとめて追加する
-  final List<String> _pendingOfflineTranscripts = [];
+  final List<({String text, DateTime recordedAt, String? docId})> _pendingOfflineTranscripts = [];
   bool _firestoreLoaded = false;
 
   bool _isLoadingInProgressConversation = false;
@@ -194,12 +198,12 @@ class CaptureProvider extends ChangeNotifier
     // AISA: オフライン同期で生成されたトランスクリプトを会話リストに追加
     // conversationProviderが未初期化の場合はバッファに積んでおく
     _aisaOfflineSubscription =
-        AisaOfflineSyncService.instance.transcriptStream.listen((transcript) {
+        AisaOfflineSyncService.instance.transcriptStream.listen((event) {
       if (conversationProvider != null) {
-        _addAisaConversation(transcript);
+        _addAisaConversation(event.text, recordedAt: event.recordedAt, firestoreDocId: event.docId);
       } else {
-        _pendingOfflineTranscripts.add(transcript);
-        Logger.debug('[AISA Offline] conversationProvider未初期化のためバッファに積む: $transcript');
+        _pendingOfflineTranscripts.add(event);
+        Logger.debug('[AISA Offline] conversationProvider未初期化のためバッファに積む: ${event.text}');
       }
     }, onError: (e) {
       // ストリームエラーをログに残す（アプリクラッシュを防ぐ）
@@ -216,8 +220,8 @@ class CaptureProvider extends ChangeNotifier
     // conversationProviderが初期化されたタイミングでオフライン同期バッファを吐き出す
     if (cp != null && _pendingOfflineTranscripts.isNotEmpty) {
       Logger.debug('[AISA Offline] バッファの${_pendingOfflineTranscripts.length}件を会話リストに追加');
-      for (final transcript in _pendingOfflineTranscripts) {
-        _addAisaConversation(transcript);
+      for (final event in _pendingOfflineTranscripts) {
+        _addAisaConversation(event.text, recordedAt: event.recordedAt, firestoreDocId: event.docId);
       }
       _pendingOfflineTranscripts.clear();
     }
@@ -1450,6 +1454,8 @@ class CaptureProvider extends ChangeNotifier
           _aisaSilentTicks = 0;
           _aisaBufferTicks++;
           AisaDebugLogger.instance.info('📎 チャンク蓄積: "${chunk.substring(0, chunk.length.clamp(0, 40))}..." (合計${_aisaAccumulatedText.length}文字)');
+          // Option C: Groq結果を即座にUIへ仮表示（Claude校正完了前でも見える）
+          _upsertAisaInterim(_aisaAccumulatedText);
         } else {
           // ハルシネーションとして除去された → 無音扱い
           _aisaSilentTicks++;
@@ -1496,6 +1502,10 @@ class CaptureProvider extends ChangeNotifier
     _aisaFlushing = true;
     final rawText = _aisaAccumulatedText;
     _aisaAccumulatedText = '';
+    // flush 中に新チャンクが到着した場合、新しい仮表示が既存の pendingId を
+    // 上書きしないようここでスナップショット＆クリアする
+    final flushPendingId = _aisaPendingConversationId;
+    _aisaPendingConversationId = null;
     _aisaSilentTicks = 0;
     _aisaBufferTicks = 0;
     _aisaPendingFrames.clear();
@@ -1504,16 +1514,19 @@ class CaptureProvider extends ChangeNotifier
 
     try {
       final result = await AisaTranscriptionService.instance.correctAndSave(rawText);
-      if (result != null && result.trim().isNotEmpty) {
-        AisaDebugLogger.instance.info('✅ 会話完成: "${result.substring(0, result.length.clamp(0, 60))}${result.length > 60 ? "…" : ""}"');
-        _addAisaConversation(result);
+      if (result != null && result.text.trim().isNotEmpty) {
+        final text = result.text;
+        AisaDebugLogger.instance.info('✅ 会話完成: "${text.substring(0, text.length.clamp(0, 60))}${text.length > 60 ? "…" : ""}"');
+        _addAisaConversation(text, firestoreDocId: result.docId, replaceInterimId: flushPendingId);
       } else {
         AisaDebugLogger.instance.warning('⚠ Claude校正結果なし');
+        // 校正失敗でも仮表示は削除する（空のまま残すとユーザーが混乱する）
+        if (flushPendingId != null) _removeConversationById(flushPendingId);
       }
     } catch (e) {
       AisaDebugLogger.instance.error('❌ Claude校正/保存失敗: $e');
       // 失敗しても生テキストを表示する
-      _addAisaConversation(rawText);
+      _addAisaConversation(rawText, replaceInterimId: flushPendingId);
     } finally {
       _aisaFlushing = false;
     }
@@ -1533,11 +1546,8 @@ class CaptureProvider extends ChangeNotifier
     }
     if (count == 0) return false;
     final rms = sqrt(sumSquares / count);
-    // 閾値500: セグメントフィルタ（閾値800）との乖離を縮めてGroq APIの無駄呼び出しを削減。
-    // RMS 150〜500はVADを通過するがセグメントフィルタで破棄されていた（APIコストの無駄）。
-    // ペンダントマイクで実際に話した声は近距離のため通常RMS 1000〜10000。
-    // 500に引き上げても自声の取りこぼしはほぼ無く、環境音・遠方音起因のAPI呼び出しを大幅削減。
-    const threshold = 500.0;
+    // 下流のハルシネーション辞書で典型的な誤認識は引き続きブロックされる。
+    const threshold = _aisaVadRmsThreshold;
     AisaDebugLogger.instance.info('VAD: RMS=${rms.toStringAsFixed(1)} (閾値=$threshold) → ${rms > threshold ? "通過" : "スキップ"}');
     return rms > threshold;
   }
@@ -1580,20 +1590,41 @@ class CaptureProvider extends ChangeNotifier
     }
   }
 
-  void _addAisaConversation(String transcript) {
+  void _addAisaConversation(String transcript, {DateTime? recordedAt, String? firestoreDocId, String? replaceInterimId}) {
     if (conversationProvider == null) {
       Logger.debug('[AISA] conversationProvider未初期化のためバッファに蓄積');
-      _pendingOfflineTranscripts.add(transcript);
+      _pendingOfflineTranscripts.add((text: transcript, recordedAt: recordedAt ?? DateTime.now(), docId: firestoreDocId));
       return;
     }
     final now = DateTime.now();
+    // 録音時刻があればそれを使う（オフライン同期時の時系列並び替えのため）
+    final effectiveCreatedAt = recordedAt ?? now;
     _aisaConversationCounter++;
 
-    final parsed = _parseAisaTitleAndEmoji(transcript, now);
+    final parsed = _parseAisaTitleAndEmoji(transcript, effectiveCreatedAt);
+
+    // 仮表示IDの決定優先順位:
+    //   1. 明示的に渡された replaceInterimId (flush開始時にスナップショットされたもの)
+    //   2. 現在の _aisaPendingConversationId (リエントラント呼び出しのフォールバック)
+    // Firestore docId があれば `aisa_fs_${docId}` を最終IDとする
+    // （リロード時の `_loadConversationsFromFirestore` と同じID形式）
+    final pendingId = replaceInterimId ?? _aisaPendingConversationId;
+    if (replaceInterimId == null) {
+      _aisaPendingConversationId = null;
+    }
+    final hasValidDocId = firestoreDocId != null && firestoreDocId.isNotEmpty;
+    final finalId = hasValidDocId
+        ? 'aisa_fs_$firestoreDocId'
+        : (pendingId ?? 'aisa_${effectiveCreatedAt.millisecondsSinceEpoch}_$_aisaConversationCounter');
+    // 仮表示IDと最終IDが別なら、仮表示を削除してから最終版を追加
+    if (pendingId != null && pendingId != finalId) {
+      _removeConversationById(pendingId);
+    }
+    final id = finalId;
 
     final conversation = ServerConversation(
-      id: 'aisa_${now.millisecondsSinceEpoch}_$_aisaConversationCounter',
-      createdAt: now,
+      id: id,
+      createdAt: effectiveCreatedAt,
       structured: Structured(
         parsed.title,
         parsed.body,
@@ -1605,6 +1636,36 @@ class CaptureProvider extends ChangeNotifier
     );
     conversationProvider!.upsertConversation(conversation);
     Logger.debug('[AISA] 会話を追加: ${parsed.title} ${parsed.emoji}');
+  }
+
+  /// 指定IDの会話をUIリストから除去する（仮表示→最終版の置換時に使用）
+  void _removeConversationById(String id) {
+    conversationProvider?.removeAisaConversationLocally(id);
+  }
+
+  /// Option C: Groqチャンク蓄積中の仮表示をUIへupsert（Claude校正完了前に即座に見せる）
+  void _upsertAisaInterim(String interimText) {
+    if (conversationProvider == null) return;
+    if (interimText.trim().isEmpty) return;
+    final now = DateTime.now();
+    _aisaPendingConversationId ??= 'aisa_pending_${now.millisecondsSinceEpoch}_${++_aisaConversationCounter}';
+    // 仮表示はタイトル固定、本文にGroq生テキストをそのまま表示
+    final preview = interimText.length > 200
+        ? '${interimText.substring(0, 200)}…'
+        : interimText;
+    final conversation = ServerConversation(
+      id: _aisaPendingConversationId!,
+      createdAt: now,
+      structured: Structured(
+        '文字起こし中…',
+        preview,
+        emoji: '✍️',
+      ),
+      transcriptSegments: [],
+      source: ConversationSource.phone,
+      status: ConversationStatus.processing,
+    );
+    conversationProvider!.upsertConversation(conversation);
   }
 
   Future<void> _autoSyncSessionWals(int sessionStartSeconds, String conversationId) async {
@@ -1926,16 +1987,21 @@ class _AisaParsed {
 
 _AisaParsed _parseAisaTitleAndEmoji(String text, DateTime timestamp) {
   final fallbackTitle = '${timestamp.hour.toString().padLeft(2, '0')}:${timestamp.minute.toString().padLeft(2, '0')} の会話';
-  final lines = text.split('\n');
+  // F0マーカー残留ガード（Claude失敗時の保険）
+  final cleanedText = AisaTranscriptionService.stripF0Markers(text);
+  final lines = cleanedText.split('\n');
   if (lines.isNotEmpty && lines[0].contains('\t')) {
     final parts = lines[0].split('\t');
     if (parts.length >= 2 && parts[0].trim().isNotEmpty) {
+      // タイトルから話者タグ（[自分🧔] 等）が混入した場合は除去
+      final titleRaw = parts[0].trim().replaceAll(RegExp(r'^\[[^\]]+\]\s*'), '').trim();
+      final title = titleRaw.isNotEmpty ? titleRaw : fallbackTitle;
       return _AisaParsed(
-        title: parts[0].trim(),
+        title: title,
         emoji: parts[1].trim(),
         body: lines.skip(1).join('\n').trim(),
       );
     }
   }
-  return _AisaParsed(title: fallbackTitle, emoji: '🎙️', body: text);
+  return _AisaParsed(title: fallbackTitle, emoji: '🎙️', body: cleanedText);
 }

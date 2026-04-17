@@ -23,9 +23,10 @@ class AisaOfflineSyncService {
   static final AisaOfflineSyncService instance = AisaOfflineSyncService._();
 
   /// 文字起こし完了時にテキストを流すStream（CaptureProviderが購読）
-  final StreamController<String> _transcriptController =
-      StreamController<String>.broadcast();
-  Stream<String> get transcriptStream => _transcriptController.stream;
+  /// text: 文字起こし結果、recordedAt: 実際の録音時刻（時系列表示に使う）
+  final StreamController<({String text, DateTime recordedAt, String? docId})> _transcriptController =
+      StreamController<({String text, DateTime recordedAt, String? docId})>.broadcast();
+  Stream<({String text, DateTime recordedAt, String? docId})> get transcriptStream => _transcriptController.stream;
 
   bool _isCancelled = false;
   bool _isSyncing = false;
@@ -182,6 +183,16 @@ class AisaOfflineSyncService {
         // 結合WAVをGroq Whisperで文字起こし
         final combinedFile = await _writeTempWav(combinedWav, 'aisa_batch_${batch.first.id}.wav');
 
+        // ライブ優先制御: ライブ会話がAPI呼び出し中/直近ならそちらを優先して待機
+        if (AisaTranscriptionService.instance.isLiveActive) {
+          AisaDebugLogger.instance.info('[Offline] ライブ会話進行中 → API呼び出しを待機');
+          await AisaTranscriptionService.instance.waitForLiveQuiet();
+        }
+        if (_isCancelled) {
+          try { await combinedFile.delete(); } catch (_) {}
+          break;
+        }
+
         const maxRetries = 2;
         String? transcript;
         for (int attempt = 0; attempt <= maxRetries; attempt++) {
@@ -223,12 +234,20 @@ class AisaOfflineSyncService {
       if (sessionTranscripts.isEmpty) continue;
 
       final combined = sessionTranscripts.join(' ');
+      // セッション先頭WALのtimerStartを録音時刻として使用（時系列順に並べるため）
+      final firstTimerStart = sessionWals.first.timerStart;
+      final recordedAt = firstTimerStart > 1000000000 // 妥当なepochか判定（2001年以降）
+          ? DateTime.fromMillisecondsSinceEpoch(firstTimerStart * 1000)
+          : DateTime.now();
+      String? docId;
+      try {
+        docId = await AisaFirestoreService.instance.saveTranscript(combined);
+      } catch (_) {}
       try {
         if (!_transcriptController.isClosed) {
-          _transcriptController.add(combined);
+          _transcriptController.add((text: combined, recordedAt: recordedAt, docId: docId));
         }
       } catch (_) {}
-      await AisaFirestoreService.instance.saveTranscript(combined);
       savedSessions++;
       debugPrint('[AISA Offline] セッション保存 (${combined.length}文字)');
     }
@@ -367,7 +386,9 @@ class AisaOfflineSyncService {
       final prevEnd = prev.timerStart + prev.seconds;
       final gap = curr.timerStart - prevEnd;
 
-      if (gap <= 65 && curr.device == prev.device) {
+      // 会話セッションの区切り: 5分以上のギャップ、または同時刻に前後する異常値、または別デバイス
+      // ペンダントは装着中ずっと60秒ごとに録音するため緩い閾値だと数日分が結合されてしまう
+      if (gap >= 0 && gap <= 300 && curr.device == prev.device) {
         currentGroup.add(curr);
       } else {
         groups.add(currentGroup);
