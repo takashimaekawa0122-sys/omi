@@ -95,7 +95,7 @@ class CaptureProvider extends ChangeNotifier
   bool get isWalSupported => _isWalSupported;
 
   StreamSubscription<bool>? _connectionStateListener;
-  StreamSubscription<String>? _aisaOfflineSubscription;
+  StreamSubscription<({String text, DateTime recordedAt, String? docId})>? _aisaOfflineSubscription;
   bool _isConnected = ConnectivityService().isConnected;
 
   get isConnected => _isConnected;
