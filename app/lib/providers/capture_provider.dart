@@ -983,7 +983,29 @@ class CaptureProvider extends ChangeNotifier
     }
   }
 
+  // フォアグラウンド復帰処理のデバウンス用
+  // WidgetsBindingObserver が何らかの事情で複数登録されていると
+  // didChangeAppLifecycleState が同一イベントで複数回発火し、
+  // BLE再接続が同時に走って iOS BLE スタックが破損・クラッシュする。
+  DateTime? _lastResumeAttemptAt;
+  bool _resumeInFlight = false;
+
   Future<void> _resumeAfterBackground() async {
+    // 【デバウンス】同一 resumed イベントでの2重発火を抑止。
+    // 進行中の再接続があれば無視、3秒以内の連続呼び出しも無視する。
+    if (_resumeInFlight) {
+      Logger.debug('[AISA] フォアグラウンド復帰: 進行中のため抑止');
+      return;
+    }
+    final now = DateTime.now();
+    if (_lastResumeAttemptAt != null &&
+        now.difference(_lastResumeAttemptAt!) < const Duration(seconds: 3)) {
+      Logger.debug('[AISA] フォアグラウンド復帰: デバウンス抑止 (前回から3秒以内)');
+      return;
+    }
+    _lastResumeAttemptAt = now;
+    _resumeInFlight = true;
+
     try {
       final deviceId = SharedPreferencesUtil().btDevice.id;
       if (deviceId.isEmpty) return;
@@ -1004,6 +1026,8 @@ class CaptureProvider extends ChangeNotifier
     } catch (e) {
       Logger.debug('[AISA] フォアグラウンド復帰処理失敗（自動再接続に委ねる）: $e');
       AisaDebugLogger.instance.warning('⚠ フォアグラウンド復帰失敗: $e');
+    } finally {
+      _resumeInFlight = false;
     }
   }
 

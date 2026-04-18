@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/conversation.dart';
@@ -8,6 +9,7 @@ import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/services/aisa_offline_sync_service.dart';
 import 'package:omi/services/services.dart';
 import 'package:omi/services/wals.dart';
+import 'package:omi/utils/aisa_debug_logger.dart';
 import 'package:omi/utils/debug_log_manager.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/other/time_utils.dart';
@@ -150,9 +152,20 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
   }
 
   void _initializeProvider() async {
+    // 【クラッシュループ救済】前回起動から30秒以内の再起動を検出したら
+    // pending WAL を synced にマークして処理をスキップさせる。
+    // 起動→即クラッシュ→再起動→即クラッシュ を繰り返す死のループを止めるため。
+    await _salvageZombieWalsIfCrashLoopDetected();
+
     await refreshWals();
-    // 起動時：前セッションでディスクに残ったWALを処理
-    await _triggerAisaOfflineSyncIfNeeded();
+
+    // 【重要】起動時の自動オフライン同期は削除した。理由:
+    // (1) pending WAL が多数あるとウォームアップキャンセル→再開の while ループが
+    //     BLE再接続・syncAll・フォアグラウンド復帰処理と競合し、
+    //     iOS WatchDog にアプリがキルされるクラッシュループを誘発していた。
+    // (2) オフライン同期は onWalUpdated（新チャンク到着時）で自然にトリガーされ、
+    //     ユーザーが手動同期ボタンを押した後も syncWals 経由で実行される。
+    //     起動時に先回りして走らせる必要はない。
   }
 
   bool _isAisaSyncing = false;
@@ -163,6 +176,80 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
   bool get isInPostSyncCooldown {
     if (_lastSyncCompletedAt == null) return false;
     return DateTime.now().difference(_lastSyncCompletedAt!) < const Duration(seconds: 30);
+  }
+
+  /// 【クラッシュループ救済】
+  /// 前回起動から30秒以内の再起動は iOS WatchDog によるクラッシュキルの可能性が高い。
+  /// その状態で pending WAL が残っているとクラッシュを繰り返すため、
+  /// 強制的に synced にマーク＋ファイル削除して次回起動を安定化させる。
+  ///
+  /// 対象となる WAL は既に Firestore に保存済みか、どうせ処理できない異常データ
+  /// であるため、救済して進むほうが「永久にクラッシュするアプリ」を放置するよりマシ。
+  ///
+  /// ユーザー報告: オフライン録音があるとアプリが起動数秒で繰り返しクラッシュする。
+  Future<void> _salvageZombieWalsIfCrashLoopDetected() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      const keyLastLaunch = 'aisa_last_launch_ms';
+      final lastLaunchMs = prefs.getInt(keyLastLaunch) ?? 0;
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      await prefs.setInt(keyLastLaunch, nowMs);
+
+      if (lastLaunchMs == 0) {
+        Logger.debug('[AISA ZombieGuard] 初回起動: 救済スキップ');
+        return;
+      }
+      final diffSec = (nowMs - lastLaunchMs) / 1000;
+      if (diffSec >= 30) {
+        Logger.debug('[AISA ZombieGuard] 正常起動(前回から${diffSec.toStringAsFixed(1)}s): 救済不要');
+        return;
+      }
+
+      // 30秒以内の再起動 = クラッシュの疑い濃厚
+      await refreshWals();
+      final zombies = _allWals
+          .where((w) => w.status == WalStatus.miss && w.storage == WalStorage.disk)
+          .toList();
+
+      Logger.debug(
+          '[AISA ZombieGuard] クラッシュ疑い(${diffSec.toStringAsFixed(1)}s後再起動) '
+          '→ pending WAL ${zombies.length}件を検査');
+      AisaDebugLogger.instance.warning(
+        '⚠ クラッシュ疑い検出 → pending WAL ${zombies.length}件を救済',
+        context: {
+          'lastLaunchDiffSec': diffSec.toStringAsFixed(1),
+          'zombieCount': zombies.length,
+        },
+      );
+
+      if (zombies.isEmpty) return;
+
+      for (final wal in zombies) {
+        wal.status = WalStatus.synced;
+      }
+      try {
+        final phoneSync = _walService.getSyncs().phone as LocalWalSyncImpl;
+        await phoneSync.markWalSyncedAndPersist(zombies.last);
+      } catch (e) {
+        Logger.debug('[AISA ZombieGuard] 永続化失敗(続行): $e');
+      }
+      try {
+        await _walService.getSyncs().deleteAllSyncedWals();
+      } catch (e) {
+        Logger.debug('[AISA ZombieGuard] WAL削除失敗(続行): $e');
+      }
+      await refreshWals();
+
+      AisaDebugLogger.instance.info(
+        '[AISA ZombieGuard] ${zombies.length}件を救済完了。次回以降は安定起動する見込み',
+      );
+    } catch (e, st) {
+      Logger.debug('[AISA ZombieGuard] 処理エラー(続行): $e');
+      AisaDebugLogger.instance.warning(
+        '[AISA ZombieGuard] 処理エラー(続行): $e',
+        context: {'stackTrace': st.toString()},
+      );
+    }
   }
 
   /// AISA Phase 2: ディスク上の未同期WALをGroq Whisperで文字起こしする
