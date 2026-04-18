@@ -14,6 +14,7 @@
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:share_plus/share_plus.dart';
 
 import 'package:omi/utils/aisa_debug_logger.dart';
 
@@ -92,6 +93,125 @@ class _AisaDebugScreenState extends State<AisaDebugScreen> {
       const SnackBar(
         content: Text('ログをクリアしました'),
         duration: Duration(seconds: 1),
+      ),
+    );
+  }
+
+  /// ログファイル（過去3日分）を共有シートで送信する。
+  /// クラッシュ後にメモリログが失われた場合、前回セッションのログを
+  /// ここから取り出して送信できる。
+  Future<void> _shareLogFiles() async {
+    try {
+      // 書き込みキューをフラッシュしてから取得
+      await AisaDebugLogger.instance.flush();
+      final files = await AisaDebugLogger.instance.listLogFiles();
+      if (files.isEmpty) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('共有可能なログファイルがありません（未初期化の可能性）'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+        return;
+      }
+      final xfiles = files
+          .map((f) => XFile(f.path, mimeType: 'text/plain'))
+          .toList();
+      final sizes = await Future.wait(files.map((f) async {
+        try {
+          return await f.length();
+        } catch (_) {
+          return 0;
+        }
+      }));
+      final totalBytes = sizes.fold<int>(0, (a, b) => a + b);
+      final logger = AisaDebugLogger.instance;
+      await Share.shareXFiles(
+        xfiles,
+        subject: 'AISA Debug Logs (${files.length} files)',
+        text: 'AISA Debug Logs\n'
+            'session: ${logger.sessionId}\n'
+            'files: ${files.length}\n'
+            'totalBytes: $totalBytes\n',
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('共有失敗: $e')),
+      );
+    }
+  }
+
+  /// ログファイルの一覧と保存パスを表示するダイアログ。
+  /// 共有メニューが使えない状況でもファイル位置を把握できる。
+  Future<void> _showLogFileInfo() async {
+    await AisaDebugLogger.instance.flush();
+    final files = await AisaDebugLogger.instance.listLogFiles();
+    final logger = AisaDebugLogger.instance;
+    if (!mounted) return;
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1C1C1E),
+        title: const Text('ログファイル情報',
+            style: TextStyle(color: Colors.white, fontSize: 16)),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                  'ファイル永続化: ${logger.isFileLoggingEnabled ? "有効" : "無効"}',
+                  style: TextStyle(
+                      color: logger.isFileLoggingEnabled
+                          ? Colors.greenAccent
+                          : Colors.redAccent,
+                      fontSize: 12)),
+              const SizedBox(height: 8),
+              Text('セッションID: ${logger.sessionId}',
+                  style: const TextStyle(color: Colors.white70, fontSize: 12)),
+              const SizedBox(height: 12),
+              const Text('保存されているファイル:',
+                  style: TextStyle(color: Colors.white54, fontSize: 11)),
+              const SizedBox(height: 4),
+              if (files.isEmpty)
+                const Text('（なし）',
+                    style: TextStyle(color: Colors.white38, fontSize: 11))
+              else
+                ...files.map((f) {
+                  final name = f.uri.pathSegments.last;
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 4),
+                    child: Text(
+                      '• $name\n  ${f.path}',
+                      style: const TextStyle(
+                          color: Colors.white70,
+                          fontSize: 10,
+                          fontFamily: 'monospace'),
+                    ),
+                  );
+                }),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child:
+                const Text('閉じる', style: TextStyle(color: Colors.white70)),
+          ),
+          if (files.isNotEmpty)
+            TextButton(
+              onPressed: () {
+                Navigator.of(ctx).pop();
+                _shareLogFiles();
+              },
+              child: const Text('共有する',
+                  style: TextStyle(color: Colors.greenAccent)),
+            ),
+        ],
       ),
     );
   }
@@ -175,6 +295,16 @@ class _AisaDebugScreenState extends State<AisaDebugScreen> {
             icon: const Icon(Icons.copy, color: Colors.white70),
             tooltip: 'クリップボードにコピー',
             onPressed: _copyToClipboard,
+          ),
+          IconButton(
+            icon: const Icon(Icons.ios_share, color: Colors.white70),
+            tooltip: 'ログファイルを共有（クラッシュ診断用）',
+            onPressed: _shareLogFiles,
+          ),
+          IconButton(
+            icon: const Icon(Icons.folder_open, color: Colors.white70),
+            tooltip: 'ログファイル情報',
+            onPressed: _showLogFileInfo,
           ),
           IconButton(
             icon: const Icon(Icons.delete_outline, color: Colors.white70),

@@ -1,6 +1,6 @@
 // app/lib/utils/aisa_debug_logger.dart
 //
-// A.I.S.A. インメモリデバッグログシステム（拡張版）
+// A.I.S.A. インメモリデバッグログシステム（拡張版 + ファイル永続化）
 // 文字起こしパイプラインの各ステップをリアルタイムで記録し、
 // アプリ内のデバッグ画面から確認できる（Xcode不要）。
 //
@@ -13,9 +13,19 @@
 // - スタックトレース捕捉
 // - 絵文字からのカテゴリ自動推定 (後方互換のため)
 // - 既存の info/warning/error(message) API は完全互換
+// - 【新】ファイル永続化（アプリkill後もログが残る。クラッシュ診断用。）
+//   * getApplicationDocumentsDirectory()/aisa_debug_YYYYMMDD.log
+//   * 10MBローテーション、3日間保持
+//   * 書き込みは単一キューでシリアル実行（レース無し、fire-and-forget）
+//   * devLogsToFileEnabled に非依存で常時ON
+//   * AisaDebugLogger.initFileLogging() をmain()で呼ぶだけで有効化
 
+import 'dart:async';
 import 'dart:collection';
+import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/foundation.dart';
+import 'package:path_provider/path_provider.dart';
 
 /// ログレベル（重要度順）
 enum AisaLogLevel {
@@ -187,6 +197,11 @@ AisaLogCategory _guessCategory(String message) {
 /// 文字起こしパイプラインのインメモリリングバッファロガー。
 /// 最新 [maxEntries] 件を保持し、ChangeNotifier でUIにリアルタイム通知する。
 /// ファイルI/Oなし・常時ON・セッション内で有効。
+///
+/// 【クラッシュ診断用ファイル永続化】
+/// initFileLogging()を起動時に呼ぶと、以降のログが
+/// getApplicationDocumentsDirectory()/aisa_debug_YYYYMMDD.log に追記される。
+/// アプリkillされてもファイルは残るので、次回起動時に共有できる。
 class AisaDebugLogger extends ChangeNotifier {
   AisaDebugLogger._() : _sessionStartedAt = DateTime.now() {
     // セッション開始ヘッダを投入
@@ -205,6 +220,12 @@ class AisaDebugLogger extends ChangeNotifier {
   /// リングバッファ上限（従来 200 → 2000 に拡張）
   static const int maxEntries = 2000;
 
+  /// ファイルローテーション上限（10MB）
+  static const int _maxFileBytes = 10 * 1024 * 1024;
+
+  /// ファイル保持日数
+  static const int _retainDays = 3;
+
   final ListQueue<AisaLogEntry> _entries = ListQueue();
   final DateTime _sessionStartedAt;
   late final String sessionId = _generateSessionId(_sessionStartedAt);
@@ -213,6 +234,175 @@ class AisaDebugLogger extends ChangeNotifier {
   final Map<AisaLogCategory, int> _countsByCategory = {};
   final Map<AisaLogLevel, int> _countsByLevel = {};
   int _totalLogged = 0;
+
+  // === ファイル永続化 ===
+  File? _logFile;
+  bool _fileLoggingEnabled = false;
+  bool _fileInitInProgress = false;
+  // 書き込みを1つずつシリアライズするFutureチェーン
+  Future<void> _writeQueue = Future<void>.value();
+
+  /// 現在のログファイル（未初期化ならnull）
+  File? get logFile => _logFile;
+
+  /// ファイル永続化が有効か
+  bool get isFileLoggingEnabled => _fileLoggingEnabled;
+
+  /// 【起動時に1回呼ぶ】ファイル永続化を有効化する。
+  /// 失敗してもログ機能自体は壊れない（メモリロギングは継続）。
+  Future<void> initFileLogging() async {
+    if (_fileLoggingEnabled || _fileInitInProgress) return;
+    _fileInitInProgress = true;
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      await _pruneOldLogFiles(dir);
+      final f = File('${dir.path}/${_dailyFileName()}');
+      if (!(await f.exists())) {
+        await f.create(recursive: true);
+      }
+      _logFile = f;
+      _fileLoggingEnabled = true;
+
+      // ヘッダ行を追記（セッション境界が一目でわかるように）
+      final header =
+          '===== AISA SESSION START ${_sessionStartedAt.toIso8601String()} '
+          'sessionId=$sessionId =====\n';
+      _enqueueWrite(header);
+
+      // 既存のインメモリエントリを一括でディスクに吐き出す
+      // （initFileLogging前のログも保存するため）
+      final backlog = _entries.toList();
+      if (backlog.isNotEmpty) {
+        final sb = StringBuffer();
+        for (final e in backlog) {
+          sb.writeln(_formatForFile(e));
+        }
+        _enqueueWrite(sb.toString());
+      }
+
+      log(
+        'AISA ファイル永続化 有効化',
+        level: AisaLogLevel.info,
+        category: AisaLogCategory.system,
+        context: {'path': f.path},
+      );
+    } catch (e, st) {
+      // ファイル初期化失敗はメモリログに残す
+      log(
+        'AISA ファイル永続化 初期化失敗: $e',
+        level: AisaLogLevel.warning,
+        category: AisaLogCategory.system,
+        stackTrace: st,
+      );
+    } finally {
+      _fileInitInProgress = false;
+    }
+  }
+
+  static String _dailyFileName() {
+    final d = DateTime.now().toUtc();
+    final y = d.year.toString().padLeft(4, '0');
+    final m = d.month.toString().padLeft(2, '0');
+    final day = d.day.toString().padLeft(2, '0');
+    return 'aisa_debug_$y$m$day.log';
+  }
+
+  static String _formatForFile(AisaLogEntry e) {
+    // 1行= JSON（機械処理しやすい + 改行セーフ）
+    final payload = <String, Object?>{
+      'ts': e.timestamp.toIso8601String(),
+      'level': e.level.label.trim(),
+      'category': e.category.label,
+      'message': e.message,
+      if (e.context != null && e.context!.isNotEmpty)
+        'context': e.context!.map((k, v) => MapEntry(k, v?.toString())),
+      if (e.stackTrace != null) 'stack': e.stackTrace,
+    };
+    try {
+      return jsonEncode(payload);
+    } catch (_) {
+      // Mapの中に非JSON値が入っていた場合のフォールバック
+      return '{"ts":"${e.timestamp.toIso8601String()}","level":"${e.level.label.trim()}","category":"${e.category.label}","message":${jsonEncode(e.message)}}';
+    }
+  }
+
+  /// 書き込みをキューに投入（fire-and-forget）。
+  /// 書き込み失敗時は握りつぶす（ログ機構自体が例外を投げないように）。
+  void _enqueueWrite(String line) {
+    final f = _logFile;
+    if (f == null || !_fileLoggingEnabled) return;
+    _writeQueue = _writeQueue.then((_) async {
+      try {
+        // サイズ上限チェック（10MB超えたらファイルをtruncate）
+        final len = await f.length();
+        if (len > _maxFileBytes) {
+          await f.writeAsString(
+            '===== LOG ROTATED ${DateTime.now().toIso8601String()} =====\n',
+            mode: FileMode.write,
+            flush: true,
+          );
+        }
+        await f.writeAsString(line, mode: FileMode.append, flush: false);
+      } catch (_) {
+        // 握りつぶす
+      }
+    });
+  }
+
+  /// 3日より古いログファイルを削除
+  Future<void> _pruneOldLogFiles(Directory dir) async {
+    try {
+      final now = DateTime.now().toUtc();
+      await for (final entity in dir.list(followLinks: false)) {
+        if (entity is! File) continue;
+        final name = entity.uri.pathSegments.isNotEmpty
+            ? entity.uri.pathSegments.last
+            : '';
+        if (!name.startsWith('aisa_debug_') || !name.endsWith('.log')) continue;
+        final datePart =
+            name.replaceAll('aisa_debug_', '').replaceAll('.log', '');
+        if (datePart.length != 8) continue;
+        final y = int.tryParse(datePart.substring(0, 4));
+        final m = int.tryParse(datePart.substring(4, 6));
+        final d = int.tryParse(datePart.substring(6, 8));
+        if (y == null || m == null || d == null) continue;
+        final fileDate = DateTime.utc(y, m, d);
+        if (now.difference(fileDate).inDays > _retainDays) {
+          try {
+            await entity.delete();
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
+  }
+
+  /// 利用可能なログファイル一覧（新しい順）。UI共有用。
+  Future<List<File>> listLogFiles() async {
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final files = <File>[];
+      await for (final entity in dir.list(followLinks: false)) {
+        if (entity is! File) continue;
+        final name = entity.uri.pathSegments.isNotEmpty
+            ? entity.uri.pathSegments.last
+            : '';
+        if (!name.startsWith('aisa_debug_') || !name.endsWith('.log')) continue;
+        files.add(entity);
+      }
+      files.sort((a, b) =>
+          b.uri.pathSegments.last.compareTo(a.uri.pathSegments.last));
+      return files;
+    } catch (_) {
+      return const <File>[];
+    }
+  }
+
+  /// 書き込みキューが空になるまで待つ（共有前のフラッシュ用）
+  Future<void> flush() async {
+    try {
+      await _writeQueue;
+    } catch (_) {}
+  }
 
   List<AisaLogEntry> get entries => List.unmodifiable(_entries);
   int get length => _entries.length;
@@ -251,6 +441,11 @@ class AisaDebugLogger extends ChangeNotifier {
     _totalLogged++;
     _countsByCategory[cat] = (_countsByCategory[cat] ?? 0) + 1;
     _countsByLevel[level] = (_countsByLevel[level] ?? 0) + 1;
+
+    // ファイル永続化（fire-and-forget。失敗してもログ機能は継続）
+    if (_fileLoggingEnabled) {
+      _enqueueWrite('${_formatForFile(entry)}\n');
+    }
 
     notifyListeners();
   }

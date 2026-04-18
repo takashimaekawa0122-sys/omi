@@ -81,6 +81,7 @@ import 'package:omi/pages/settings/developer.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
 import 'package:omi/services/aisa_firestore_service.dart';
+import 'package:omi/utils/aisa_debug_logger.dart';
 
 /// Background message handler for FCM data messages
 @pragma('vm:entry-point')
@@ -122,6 +123,21 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
 Future _init() async {
   // [A.I.S.A.] 起動ステップログ: どのステップで止まるか特定するため
   void step(String name) => debugPrint('[AISA-INIT] >>> $name');
+
+  // 【最優先】AISAログのファイル永続化を有効化する。
+  // アプリがクラッシュ/killされても原因調査できるよう、
+  // 他のどの初期化よりも先にディスク書き込みを開始する。
+  // initFileLoggingは内部でtry/catchしているため失敗しても起動は続行。
+  step('0: AisaDebugLogger.initFileLogging START');
+  try {
+    await AisaDebugLogger.instance.initFileLogging().timeout(
+      const Duration(seconds: 3),
+      onTimeout: () => debugPrint('[AISA] initFileLogging timeout'),
+    );
+  } catch (e) {
+    debugPrint('[AISA] initFileLogging error: $e');
+  }
+  step('0: AisaDebugLogger.initFileLogging DONE');
 
   step('1: Env.init');
   if (F.env == Environment.prod) {
