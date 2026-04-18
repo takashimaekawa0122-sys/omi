@@ -97,6 +97,34 @@ class _AisaDebugScreenState extends State<AisaDebugScreen> {
     );
   }
 
+  /// 現在のコンテキストから iPad 用ポップオーバー表示位置(Rect)を取得する。
+  /// share_plus 11 はこの引数が空Rectだと `{{0,0},{0,0}} must be non-zero`
+  /// の PlatformException を投げるため、最低でも 1x1 の非ゼロRectを渡す。
+  Rect _shareOriginFromContext() {
+    try {
+      final box = context.findRenderObject() as RenderBox?;
+      if (box != null && box.hasSize) {
+        final offset = box.localToGlobal(Offset.zero);
+        final size = box.size;
+        if (size.width > 0 && size.height > 0) {
+          return offset & size;
+        }
+      }
+    } catch (_) {}
+    // 画面中央付近の妥当なフォールバック（画面内で非ゼロであればOK）
+    final media = MediaQuery.maybeOf(context);
+    if (media != null) {
+      final size = media.size;
+      return Rect.fromLTWH(
+        size.width / 2 - 1,
+        size.height / 2 - 1,
+        2,
+        2,
+      );
+    }
+    return const Rect.fromLTWH(0, 0, 1, 1);
+  }
+
   /// ログファイル（過去3日分）を共有シートで送信する。
   /// クラッシュ後にメモリログが失われた場合、前回セッションのログを
   /// ここから取り出して送信できる。
@@ -127,6 +155,10 @@ class _AisaDebugScreenState extends State<AisaDebugScreen> {
       }));
       final totalBytes = sizes.fold<int>(0, (a, b) => a + b);
       final logger = AisaDebugLogger.instance;
+      if (!mounted) return;
+      // iPad 向けに sharePositionOrigin を必ず渡す。share_plus 11 は
+      // iPhone でもこの引数がゼロRectだと PlatformException を投げる。
+      final origin = _shareOriginFromContext();
       await Share.shareXFiles(
         xfiles,
         subject: 'AISA Debug Logs (${files.length} files)',
@@ -134,6 +166,7 @@ class _AisaDebugScreenState extends State<AisaDebugScreen> {
             'session: ${logger.sessionId}\n'
             'files: ${files.length}\n'
             'totalBytes: $totalBytes\n',
+        sharePositionOrigin: origin,
       );
     } catch (e) {
       if (!mounted) return;
