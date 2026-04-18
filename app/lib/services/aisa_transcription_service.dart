@@ -393,9 +393,13 @@ class AisaTranscriptionService {
     if (filtered == null || filtered.isEmpty) return filtered;
 
     // Whisperハルシネーション除去: 無音・ノイズから生成される定型文をブロック
+    // 【重要】この判定は全文に対して行われるため、長文の場合は substring 判定は
+    // 内部で自動的にスキップされる（_isHallucination 内の 50文字ゲート）。
+    // セグメントごとの細かい判定は _filterSpeechSegments 内で既に実施済み。
     if (_isHallucination(filtered)) {
-      AisaDebugLogger.instance.warning('⚠ ハルシネーション除外: "$filtered"');
-      debugPrint('[AISA] ハルシネーション除外: "$filtered"');
+      AisaDebugLogger.instance.warning(
+          '⚠ ハルシネーション除外(${filtered.length}文字): "${filtered.substring(0, filtered.length.clamp(0, 80))}${filtered.length > 80 ? "…" : ""}"');
+      debugPrint('[AISA] ハルシネーション除外(${filtered.length}文字): "$filtered"');
       return null;
     }
 
@@ -964,8 +968,20 @@ class AisaTranscriptionService {
       'Until next time',
       'this video',
     ];
-    for (final h in substringHallucinations) {
-      if (t.contains(h)) return true;
+    // 【重要】substring 判定は短文（≤50文字）にのみ適用する。
+    // 【根本原因】オフライン同期で結合された長文（20分分の会話等）は、
+    //   真の会話でも「ということです」「申し訳ございません」「お送りしました」等の
+    //   自然な表現を含むため、substring 判定すると会話全体が誤って破棄される。
+    // セグメント単位のフィルタ（_filterSpeechSegments 内）でも同じ関数を呼ぶが、
+    // セグメント text は通常50文字以下なので substring 判定は効く。
+    // 一方で combined transcript（数十〜数百文字）は例外的に素通しする。
+    if (t.length <= 50) {
+      for (final h in substringHallucinations) {
+        if (t.contains(h)) {
+          debugPrint('[AISA Hallucination] 短文substring一致: "$h" in "$t"');
+          return true;
+        }
+      }
     }
 
     return false;

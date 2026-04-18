@@ -176,9 +176,16 @@ class AisaOfflineSyncService {
 
             final wavBytes = await wavFile.readAsBytes();
             final rms = _calcRms(wavBytes);
-            if (rms <= 500) {
+            // 【修正】60秒チャンク全体のRMSは、断続的な会話では自然に低くなる
+            //   （無音時間が長い場合、平均RMSは100〜400が普通）。
+            // 以前の閾値 500 は会話相手・装着者の遠めの発話まで大量に捨てていた。
+            // セグメント単位のVAD（_kSegmentQuietRms=80）・Whisperのno_speech_prob
+            // で後段で細かく判定するため、ここでは「ほぼ完全な無音」のみ除外する。
+            if (rms <= 120) {
               skipCount++;
-              continue; // 環境音・小さな物音をスキップ（人の声は通常RMS 500以上）
+              AisaDebugLogger.instance.vad(
+                  '[Offline] チャンク除外(rms=$rms): ${wal.filePath}');
+              continue;
             }
 
             // WAVデータ部分のみ抽出（ヘッダー44バイトを除く）
@@ -195,15 +202,18 @@ class AisaOfflineSyncService {
           try { await f.delete(); } catch (_) {}
         }
 
-        if (validWavBytes.isEmpty) continue;
-
-        // バッチ内の有効チャンク率が極端に低い場合はスキップ
-        // 5チャンク以上のバッチで有効が1件だけ = 一瞬の物音 → API呼び出しを節約
-        if (validWavBytes.length <= 1 && batch.length >= 5) {
-          debugPrint('[AISA Offline] バッチスキップ: ${validWavBytes.length}/${batch.length}チャンクのみ有効 → 環境音と判定');
-          skipCount += validWavBytes.length;
+        if (validWavBytes.isEmpty) {
+          AisaDebugLogger.instance.info(
+              '[Offline] バッチ全滅(有効0/${batch.length}) → スキップ');
           continue;
         }
+
+        // 【修正】旧「5チャンク中1チャンクしか有効 → バッチ全破棄」ヒューリスティクスは
+        // 会話の切れ目が多い自然な録音（昼休みに会話→沈黙→再開）で正当な発話を
+        // 捨てていたため削除。1チャンク分でも有効な音声があれば Groq に送る。
+        // 真に無音なら上段の RMS≤120 チェックで既に除外されている。
+        AisaDebugLogger.instance.info(
+            '[Offline] バッチ採用(${validWavBytes.length}/${batch.length}チャンク) → Groq送信');
 
         // 有効なWAVデータを1つのWAVファイルに結合
         final combinedWav = _combineWavData(validWavBytes);
@@ -230,6 +240,7 @@ class AisaOfflineSyncService {
 
         const maxRetries = 2;
         String? transcript;
+        Object? lastError;
         for (int attempt = 0; attempt <= maxRetries; attempt++) {
           try {
             transcript = await AisaTranscriptionService.instance.transcribeOnly(
@@ -238,8 +249,11 @@ class AisaOfflineSyncService {
             );
             break;
           } catch (e) {
+            lastError = e;
             final isRateLimit = e.toString().contains('429');
             final waitSecs = isRateLimit ? 60 : 10 * (attempt + 1);
+            AisaDebugLogger.instance.warning(
+                '[Offline] Groq送信失敗(${attempt + 1}/${maxRetries + 1}): $e → ${attempt < maxRetries ? "${waitSecs}s後リトライ" : "諦め"}');
             if (attempt < maxRetries) {
               await Future.delayed(Duration(seconds: waitSecs));
             }
@@ -249,12 +263,26 @@ class AisaOfflineSyncService {
         try { await combinedFile.delete(); } catch (_) {}
         totalApiCalls++;
 
-        if (transcript != null && transcript.trim().isNotEmpty) {
-          // ハルシネーションチェック（オフライン同期でもフィルタリング）
-          if (!AisaTranscriptionService.isHallucination(transcript.trim())) {
-            sessionTranscripts.add(transcript.trim());
+        if (transcript == null) {
+          AisaDebugLogger.instance.warning(
+              '[Offline] transcribeOnly null返却 (無音orハルシネーション判定) err=$lastError');
+          skipCount++;
+        } else if (transcript.trim().isEmpty) {
+          AisaDebugLogger.instance.info('[Offline] transcript空文字 → スキップ');
+          skipCount++;
+        } else {
+          // ハルシネーションチェック（オフライン同期でもフィルタリング）。
+          // combined 長文に対しては substring 判定は自動的にスキップされる
+          // （_isHallucination 内の 50文字ゲート）。
+          final trimmed = transcript.trim();
+          if (!AisaTranscriptionService.isHallucination(trimmed)) {
+            AisaDebugLogger.instance.info(
+                '[Offline] バッチ成功: ${trimmed.length}文字採用');
+            sessionTranscripts.add(trimmed);
           } else {
-            debugPrint('[AISA Offline] ハルシネーション検出 → 破棄');
+            AisaDebugLogger.instance.warning(
+                '[Offline] ハルシネーション検出(${trimmed.length}文字) → 破棄: "${trimmed.substring(0, trimmed.length.clamp(0, 60))}${trimmed.length > 60 ? "…" : ""}"');
+            debugPrint('[AISA Offline] ハルシネーション検出 → 破棄: $trimmed');
             skipCount++;
           }
         }
@@ -266,7 +294,11 @@ class AisaOfflineSyncService {
       }
 
       // セッションの全バッチ結果を結合して保存
-      if (sessionTranscripts.isEmpty) continue;
+      if (sessionTranscripts.isEmpty) {
+        AisaDebugLogger.instance.warning(
+            '[Offline] セッション破棄: ${sessionWals.length}チャンクから有効な文字起こし0件');
+        continue;
+      }
 
       final combined = sessionTranscripts.join(' ');
       // セッション先頭WALのtimerStartを録音時刻として使用（時系列順に並べるため）
@@ -278,12 +310,22 @@ class AisaOfflineSyncService {
       try {
         // オフライン同期はClaude校正を行わないため、combined全体が本文（タイトル/絵文字なし）
         docId = await AisaFirestoreService.instance.saveTranscript(combined, body: combined);
-      } catch (_) {}
+      } catch (e) {
+        AisaDebugLogger.instance.warning(
+            '[Offline] Firestore保存失敗(UIには流す): $e');
+      }
       try {
         if (!_transcriptController.isClosed) {
           _transcriptController.add((text: combined, recordedAt: recordedAt, docId: docId));
+          AisaDebugLogger.instance.info(
+              '[Offline] ストリーム送出: ${combined.length}文字 docId=$docId');
+        } else {
+          AisaDebugLogger.instance.warning(
+              '[Offline] ⚠ ストリームClosed - UI更新不可');
         }
-      } catch (_) {}
+      } catch (e) {
+        AisaDebugLogger.instance.warning('[Offline] ストリーム送出失敗: $e');
+      }
       savedSessions++;
       debugPrint('[AISA Offline] セッション保存 (${combined.length}文字)');
     }
