@@ -151,34 +151,55 @@ class AisaOfflineSyncService {
     // 期間: 起動直後=120秒 / 同期完了後=180秒
     // Omiペンダントの既存録音が大量に存在する場合、即座にGroqを叩くと
     // ライブ側が429で窒息するため、この期間はライブ経路を優先させる。
-    final warmupStart = _warmupStart;
-    final warmupDuration = _effectiveWarmupDuration;
-    final elapsed = DateTime.now().difference(warmupStart);
-    if (elapsed < warmupDuration) {
-      final remaining = warmupDuration - elapsed;
-      final warmupKind =
-          (_lastSyncCompletedAt != null && _lastSyncCompletedAt!.isAfter(_serviceStartedAt))
-              ? '同期完了後'
-              : '起動直後';
+    //
+    // 【根本対策 2026-04-19】軽量ケースはウォームアップをスキップ
+    //   旧仕様ではアプリ再起動ごとに _serviceStartedAt がリセットされ、120秒の
+    //   ウォームアップが毎回走り直していた。短時間テスト (< 2分) では永久に
+    //   オフライン同期が始まらないバグになっていた。
+    //   少量 (≤ 5件) かつ 手動SDカード同期直後でない場合はスキップし、
+    //   大量バックログ (6件以上) or SDカード同期直後のみ従来通り待機する。
+    const warmupSkipThreshold = 5;
+    final isPostManualSync =
+        _lastSyncCompletedAt != null && _lastSyncCompletedAt!.isAfter(_serviceStartedAt);
+    final needsWarmup = diskWals.length > warmupSkipThreshold || isPostManualSync;
+
+    if (needsWarmup) {
+      final warmupStart = _warmupStart;
+      final warmupDuration = _effectiveWarmupDuration;
+      final elapsed = DateTime.now().difference(warmupStart);
+      if (elapsed < warmupDuration) {
+        final remaining = warmupDuration - elapsed;
+        final warmupKind = isPostManualSync ? '同期完了後' : '起動直後(大量)';
+        AisaDebugLogger.instance.info(
+          '[Offline] ウォームアップ待機($warmupKind): 残り${remaining.inSeconds}秒（ライブ優先）',
+          context: {
+            'kind': warmupKind,
+            'remainingSec': remaining.inSeconds,
+            'warmupStart': warmupStart.toIso8601String(),
+            'walCount': diskWals.length,
+          },
+        );
+        debugPrint('[AISA Offline] ウォームアップ待機($warmupKind): 残り${remaining.inSeconds}秒');
+        // キャンセル可能な待機（1秒ごとにチェック）
+        final deadline = DateTime.now().add(remaining);
+        while (DateTime.now().isBefore(deadline) && !_isCancelled) {
+          await Future.delayed(const Duration(seconds: 1));
+        }
+        if (_isCancelled) {
+          AisaDebugLogger.instance.info('[Offline] ウォームアップ中にキャンセル');
+          return;
+        }
+        AisaDebugLogger.instance.info('[Offline] ウォームアップ完了 → 同期開始');
+      }
+    } else {
       AisaDebugLogger.instance.info(
-        '[Offline] ウォームアップ待機($warmupKind): 残り${remaining.inSeconds}秒（ライブ優先）',
+        '[Offline] 軽量処理 (${diskWals.length}件 ≤ $warmupSkipThreshold) → ウォームアップスキップ',
         context: {
-          'kind': warmupKind,
-          'remainingSec': remaining.inSeconds,
-          'warmupStart': warmupStart.toIso8601String(),
+          'walCount': diskWals.length,
+          'threshold': warmupSkipThreshold,
         },
       );
-      debugPrint('[AISA Offline] ウォームアップ待機($warmupKind): 残り${remaining.inSeconds}秒');
-      // キャンセル可能な待機（1秒ごとにチェック）
-      final deadline = DateTime.now().add(remaining);
-      while (DateTime.now().isBefore(deadline) && !_isCancelled) {
-        await Future.delayed(const Duration(seconds: 1));
-      }
-      if (_isCancelled) {
-        AisaDebugLogger.instance.info('[Offline] ウォームアップ中にキャンセル');
-        return;
-      }
-      AisaDebugLogger.instance.info('[Offline] ウォームアップ完了 → 同期開始');
+      debugPrint('[AISA Offline] 軽量処理 (${diskWals.length}件) → ウォームアップスキップ');
     }
 
     // Omiクラウドへの音声流出を防ぐため、Groq処理の前に全WALをsynced済みとしてマークする

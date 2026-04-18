@@ -58,12 +58,20 @@ class AisaTranscriptionService {
 
   // ──── ライブ優先制御 ────
   /// ライブ呼び出しのクールダウン: 最後のライブ呼び出しから何秒までを "active" 扱いにするか
-  /// ライブは5秒ティックで動くので、2ティック分+余裕の15秒にすることでバースト中の隙間に
-  /// オフラインが割り込むのを防ぐ
-  static const Duration _liveCooldown = Duration(seconds: 15);
+  /// ライブは5秒ティックで動くので、1ティック分+余裕の5秒にすることでバースト中の隙間に
+  /// オフラインが割り込むのを防ぎつつ、会話終了時に素早くオフラインへ譲る。
+  ///
+  /// 【根本対策 2026-04-19】旧値 15秒はセッション終了時にオフラインが取り残される原因だった。
+  ///   ユーザー報告のログでは、ライブ終了から 8秒後にアプリがバックグラウンド → 次回起動も
+  ///   ウォームアップでリセット → オフライン WAL が永久保留されていた。5秒に短縮することで
+  ///   短時間セッションでも offline が Groq に到達できるようにする。
+  static const Duration _liveCooldown = Duration(seconds: 5);
   /// ライブ待機の最大時間（永遠に待ち続けないためのフェイルセーフ）
-  /// 会話は数分続くことを想定し、3分まで待つ。超えた場合はログを残してオフラインを進行させる
-  static const Duration _liveWaitDefaultLimit = Duration(minutes: 3);
+  ///
+  /// 【根本対策 2026-04-19】旧値 3分 はセッション寿命より長く実質無効だった。
+  ///   30秒でタイムアウト → Groq へ送信することでセッション内処理完了を優先する。
+  ///   ライブと並行しても Groq 無料枠 20req/min には収まる（ライブ 12req/min + offline 7.5req/min）。
+  static const Duration _liveWaitDefaultLimit = Duration(seconds: 30);
   static const Duration _liveWaitPollInterval = Duration(milliseconds: 500);
 
   // ──── 音量・音声判定しきい値 ────
