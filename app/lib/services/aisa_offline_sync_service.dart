@@ -31,22 +31,73 @@ class AisaOfflineSyncService {
   bool _isCancelled = false;
   bool _isSyncing = false;
 
-  /// ライブ優先のウォームアップ時間。
+  /// ライブ優先のウォームアップ時間（アプリ起動直後）。
   /// アプリ起動〜BLE接続直後はライブ会話を優先させるため、
   /// この時間が経つまでオフライン同期のAPI呼び出しを保留する。
   /// Omiペンダント側の既存録音が大量にある場合にGroqレート枠を使い切り、
   /// ライブ文字起こしが最初の数分間まったく動かなくなる問題への対策。
   static const Duration _liveWarmupDuration = Duration(seconds: 120);
 
+  /// 手動同期（SDカード転送）完了後のライブ優先期間。
+  /// SDカード同期が完了すると大量のpending WALが一気に現れるため、
+  /// この時間が経つまでオフライン側はGroq呼び出しを保留し、
+  /// 同期直後の録音をライブ経路で確実に文字起こしさせる。
+  /// ユーザー報告: 同期完了後の数分間、文字起こしが動かない問題に対応。
+  static const Duration _postSyncWarmupDuration = Duration(seconds: 180);
+
   /// プロセス起動時刻（サービス初期化時に固定）
   final DateTime _serviceStartedAt = DateTime.now();
+
+  /// 直近の手動同期（SDカード転送）完了時刻。
+  /// SyncProvider から [notifyOfSyncCompletion] で設定される。
+  DateTime? _lastSyncCompletedAt;
 
   /// 外部から同期中かどうかを確認するためのプロパティ（二重実行防止用）
   bool get isSyncing => _isSyncing;
 
+  /// ウォームアップの起点時刻（起動時刻 または 直近同期完了時刻のうち新しい方）
+  DateTime get _warmupStart {
+    final sync = _lastSyncCompletedAt;
+    if (sync != null && sync.isAfter(_serviceStartedAt)) return sync;
+    return _serviceStartedAt;
+  }
+
+  /// ウォームアップの必要時間。
+  /// - 同期後なら _postSyncWarmupDuration（180秒）
+  /// - それ以外（起動直後）なら _liveWarmupDuration（120秒）
+  Duration get _effectiveWarmupDuration {
+    final sync = _lastSyncCompletedAt;
+    if (sync != null && sync.isAfter(_serviceStartedAt)) {
+      return _postSyncWarmupDuration;
+    }
+    return _liveWarmupDuration;
+  }
+
   /// ウォームアップ期間が終了しているか（テスト・デバッグ用）
   bool get isWarmupComplete =>
-      DateTime.now().difference(_serviceStartedAt) >= _liveWarmupDuration;
+      DateTime.now().difference(_warmupStart) >= _effectiveWarmupDuration;
+
+  /// 手動同期（SDカード転送）が完了したことをSyncProviderから通知する。
+  /// これによりオフライン同期側のウォームアップ基準時刻が更新され、
+  /// 同期完了後の数分間ライブ文字起こしを優先させる。
+  /// もしオフライン同期がすでに走っていた場合はキャンセルして、
+  /// 新しいウォームアップ起点で再スタートさせる。
+  void notifyOfSyncCompletion() {
+    _lastSyncCompletedAt = DateTime.now();
+    AisaDebugLogger.instance.info(
+      '[Offline] 手動同期完了を記録 → 以降${_postSyncWarmupDuration.inSeconds}秒はライブ優先',
+      context: {
+        'at': _lastSyncCompletedAt!.toIso8601String(),
+        'warmupSec': _postSyncWarmupDuration.inSeconds,
+        'wasRunning': _isSyncing,
+      },
+    );
+    // 走っている最中なら即キャンセル（新ウォームアップ起点で再開させる）
+    if (_isSyncing) {
+      _isCancelled = true;
+      debugPrint('[AISA Offline] 同期完了通知 → 進行中オフライン同期をキャンセル');
+    }
+  }
 
   /// 進行中の同期を中断する（手動同期開始時にSyncProviderから呼ばれる）
   void cancelSync() {
@@ -94,15 +145,29 @@ class AisaOfflineSyncService {
     debugPrint('[AISA Offline] ${diskWals.length}件のオフライン録音を処理開始');
     AisaDebugLogger.instance.info('[Offline] ${diskWals.length}件のオフライン録音を処理開始');
 
-    // 【ライブ優先ウォームアップ】起動から _liveWarmupDuration 経過するまで待機する。
+    // 【ライブ優先ウォームアップ】
+    // 起点: アプリ起動時刻 OR 直近の手動同期完了時刻のうち新しい方
+    // 期間: 起動直後=120秒 / 同期完了後=180秒
     // Omiペンダントの既存録音が大量に存在する場合、即座にGroqを叩くと
-    // ライブ側が429で窒息するため、最初の約2分はライブを優先させる。
-    final elapsed = DateTime.now().difference(_serviceStartedAt);
-    if (elapsed < _liveWarmupDuration) {
-      final remaining = _liveWarmupDuration - elapsed;
+    // ライブ側が429で窒息するため、この期間はライブ経路を優先させる。
+    final warmupStart = _warmupStart;
+    final warmupDuration = _effectiveWarmupDuration;
+    final elapsed = DateTime.now().difference(warmupStart);
+    if (elapsed < warmupDuration) {
+      final remaining = warmupDuration - elapsed;
+      final warmupKind =
+          (_lastSyncCompletedAt != null && _lastSyncCompletedAt!.isAfter(_serviceStartedAt))
+              ? '同期完了後'
+              : '起動直後';
       AisaDebugLogger.instance.info(
-          '[Offline] ウォームアップ待機: 残り${remaining.inSeconds}秒（ライブ優先）');
-      debugPrint('[AISA Offline] ウォームアップ待機: 残り${remaining.inSeconds}秒');
+        '[Offline] ウォームアップ待機($warmupKind): 残り${remaining.inSeconds}秒（ライブ優先）',
+        context: {
+          'kind': warmupKind,
+          'remainingSec': remaining.inSeconds,
+          'warmupStart': warmupStart.toIso8601String(),
+        },
+      );
+      debugPrint('[AISA Offline] ウォームアップ待機($warmupKind): 残り${remaining.inSeconds}秒');
       // キャンセル可能な待機（1秒ごとにチェック）
       final deadline = DateTime.now().add(remaining);
       while (DateTime.now().isBefore(deadline) && !_isCancelled) {

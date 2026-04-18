@@ -171,6 +171,17 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
   Future<void> _triggerAisaOfflineSyncIfNeeded() async {
     if (_isAisaSyncing) return;
 
+    // 【手動同期中はスキップ】
+    // SDカード手動同期の最中に onWalUpdated でトリガーされると、
+    // BLE帯域と Groq API枠の両方が競合して、ライブ文字起こしが
+    // 同期後の数分間まったく動かなくなる。手動同期の完了後は
+    // syncWals の finally で notifyOfSyncCompletion が呼ばれ、
+    // 180秒のライブ優先ウォームアップが走るので、それまで待つ。
+    if (_syncState.isSyncing) {
+      Logger.debug('[AISA Offline] 手動同期中のためオフライン処理を保留');
+      return;
+    }
+
     _isAisaSyncing = true;
     try {
       // 処理が完了してもまだ pending がある限りループ（チャンク逐次到着に対応）
@@ -307,6 +318,17 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
     } finally {
       // 同期完了タイムスタンプを記録（再接続時の再同期ループを防止）
       _lastSyncCompletedAt = DateTime.now();
+
+      // 【AISA】オフライン同期サービスに手動同期完了を通知する。
+      // これにより180秒のライブ優先ウォームアップが走り、
+      // 同期直後の録音がライブ経路（capture_provider）で確実に文字起こしされる。
+      // すでに走っているオフライン同期は内部でキャンセルされ、
+      // 新しいウォームアップ起点で再スタートする。
+      try {
+        AisaOfflineSyncService.instance.notifyOfSyncCompletion();
+      } catch (e) {
+        Logger.debug('[AISA] notifyOfSyncCompletion error: $e');
+      }
 
       // SDカード同期後：音声ストリーミングの再開
       // 注: ensureConnection(force:true) は呼ばない。
