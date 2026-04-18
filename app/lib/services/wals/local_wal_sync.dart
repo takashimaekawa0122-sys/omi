@@ -334,6 +334,14 @@ class LocalWalSyncImpl implements LocalWalSync {
     listener.onWalUpdated();
   }
 
+  /// Persist current in-memory WAL list to disk without mutating status.
+  /// Used by SyncProvider to save status changes applied directly to Wal objects
+  /// returned from getAllWals() (which shares object references with _wals).
+  Future<void> persistWalsToFile() async {
+    await _saveWalsToFile();
+    listener.onWalUpdated();
+  }
+
   @override
   Future<List<Wal>> getAllWals() async {
     return List.from(_wals);

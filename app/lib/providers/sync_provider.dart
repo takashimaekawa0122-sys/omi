@@ -157,6 +157,10 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
     // 起動→即クラッシュ→再起動→即クラッシュ を繰り返す死のループを止めるため。
     await _salvageZombieWalsIfCrashLoopDetected();
 
+    // 【ノイズ判定WAL復帰】前回 corrupted にマークされた失敗WALを miss に戻して再挑戦させる。
+    // リトライ上限3回未満のものだけが対象。これによりノイズ判定による永久データ消失を防ぐ。
+    await _revertCorruptedWalsForRetry();
+
     await refreshWals();
 
     // 【重要】起動時の自動オフライン同期は削除した。理由:
@@ -247,6 +251,78 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
       Logger.debug('[AISA ZombieGuard] 処理エラー(続行): $e');
       AisaDebugLogger.instance.warning(
         '[AISA ZombieGuard] 処理エラー(続行): $e',
+        context: {'stackTrace': st.toString()},
+      );
+    }
+  }
+
+  /// 【ノイズ判定WAL復帰】2026-04-18 ログ調査で判明した「オフラインWAL全件削除」
+  /// バグの対策。AisaOfflineSyncService.syncPendingWals() は、保存失敗した WAL を
+  /// WalStatus.corrupted にマークしてファイルを残す挙動になった。
+  /// 起動時にこの corrupted WAL を miss に戻して再挑戦させるのがこのメソッド。
+  ///
+  /// リトライ回数は SharedPreferences に `aisa_offline_retry_<walId>` として保存され、
+  /// 3回上限は AisaOfflineSyncService 側で判定される（3回失敗したら削除）。
+  /// ここでは単純に corrupted → miss に戻すだけで、次回の onWalUpdated か
+  /// 次回のオフライン同期ループで自動的に再試行される。
+  Future<void> _revertCorruptedWalsForRetry() async {
+    try {
+      await refreshWals();
+      final corruptedDiskWals = _allWals
+          .where((w) => w.status == WalStatus.corrupted && w.storage == WalStorage.disk)
+          .toList();
+
+      if (corruptedDiskWals.isEmpty) {
+        Logger.debug('[AISA RetryRevert] corrupted WAL なし: スキップ');
+        return;
+      }
+
+      final prefs = await SharedPreferences.getInstance();
+      const retryKeyPrefix = 'aisa_offline_retry_';
+      const maxRetries = 3;
+
+      int reverted = 0;
+      int skippedAtMax = 0;
+
+      for (final wal in corruptedDiskWals) {
+        final retryCount = prefs.getInt('$retryKeyPrefix${wal.id}') ?? 0;
+        if (retryCount >= maxRetries) {
+          // 上限到達 → corrupted のまま残す（次回の同期サイクルで削除される）
+          skippedAtMax++;
+          continue;
+        }
+        wal.status = WalStatus.miss;
+        reverted++;
+      }
+
+      // WAL リストはオブジェクト参照共有なので、永続化だけ呼べば status 変更が保存される
+      if (reverted > 0) {
+        try {
+          final phoneSync = _walService.getSyncs().phone as LocalWalSyncImpl;
+          await phoneSync.persistWalsToFile();
+        } catch (e) {
+          Logger.debug('[AISA RetryRevert] 永続化失敗(続行): $e');
+        }
+        await refreshWals();
+      }
+
+      Logger.debug(
+        '[AISA RetryRevert] 復帰=${reverted}件 / 上限到達=${skippedAtMax}件 '
+        '(corrupted disk WAL=${corruptedDiskWals.length}件)',
+      );
+      AisaDebugLogger.instance.info(
+        '[AISA RetryRevert] corrupted→miss 復帰: ${reverted}件 '
+        '(上限到達=${skippedAtMax}件)',
+        context: {
+          'reverted': reverted,
+          'skippedAtMax': skippedAtMax,
+          'corruptedTotal': corruptedDiskWals.length,
+        },
+      );
+    } catch (e, st) {
+      Logger.debug('[AISA RetryRevert] 処理エラー(続行): $e');
+      AisaDebugLogger.instance.warning(
+        '[AISA RetryRevert] 処理エラー(続行): $e',
         context: {'stackTrace': st.toString()},
       );
     }

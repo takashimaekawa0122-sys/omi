@@ -10,6 +10,7 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:omi/services/aisa_firestore_service.dart';
 import 'package:omi/services/aisa_transcription_service.dart';
@@ -193,20 +194,32 @@ class AisaOfflineSyncService {
       debugPrint('[AISA Offline] WAL一括マーク失敗（続行）: $e');
     }
 
-    // 【バッチ処理】複数チャンクのWAVを結合して1回のAPI呼び出しで処理
-    // Groq free tier: 20 req/min → 8秒間隔で安全マージン確保
-    const batchSize = 20; // 最大20チャンク（約20分）を1つのWAVに結合
+    // 【バッチ処理】チャンクを結合せず1つずつ処理
+    // 【根本対策 2026-04-18】旧設定 batchSize=20 では複数WAV結合で最大~20MBに
+    //   達し、iOS の Whisper HTTP送信中にメモリ圧迫で OOM kill が頻発していた。
+    //   また長尺バッチは Whisper のノイズ判定で全セグメント破棄されやすく、
+    //   WALがまるごと「ノイズ扱い → 削除」されてデータ消失の原因にもなっていた。
+    //   1チャンクずつ処理することでメモリ使用量を ~1MB に抑え、かつ
+    //   個別チャンクごとに Whisper が会話を拾いやすくする。
+    //   Groq free tier の 20 req/min 制限はバッチ間の 8秒 delay で回避する。
+    const batchSize = 1; // 1チャンク（約60秒）ずつ個別にGroqへ送信
 
     // セッション分割（内部でtimerStart昇順ソート → 時系列順が保証される）
     final sessions = _groupWalsBySession(diskWals);
     int savedSessions = 0;
     int totalApiCalls = 0;
     int skipCount = 0;
+    // 【根本対策 2026-04-18】書き起こしに成功したWAL IDを追跡。
+    //   失敗したWALは「ノイズ判定」であってもファイル削除せず、後でリトライできるよう corrupted に戻す。
+    final savedWalIds = <String>{};
 
     for (final sessionWals in sessions) {
       if (_isCancelled) break;
 
       final sessionTranscripts = <String>[];
+      // 【根本対策 2026-04-18】このセッションで採用されたトランスクリプトを生んだWAL ID群。
+      //   セッションが最終的に保存に成功した場合のみ、これらのWAL IDを savedWalIds に反映する。
+      final sessionContributingWalIds = <String>[];
 
       // セッション内チャンクをバッチに分割
       for (int batchStart = 0; batchStart < sessionWals.length; batchStart += batchSize) {
@@ -344,6 +357,10 @@ class AisaOfflineSyncService {
             AisaDebugLogger.instance.info(
                 '[Offline] バッチ成功: ${trimmed.length}文字採用');
             sessionTranscripts.add(trimmed);
+            // 【根本対策 2026-04-18】このバッチの WAL IDを記録（セッション保存時に削除対象）
+            for (final w in batch) {
+              sessionContributingWalIds.add(w.id);
+            }
           } else {
             AisaDebugLogger.instance.warning(
                 '[Offline] ハルシネーション検出(${trimmed.length}文字) → 破棄: "${trimmed.substring(0, trimmed.length.clamp(0, 60))}${trimmed.length > 60 ? "…" : ""}"');
@@ -392,26 +409,73 @@ class AisaOfflineSyncService {
         AisaDebugLogger.instance.warning('[Offline] ストリーム送出失敗: $e');
       }
       savedSessions++;
+      // 【根本対策 2026-04-18】セッション保存成功 → このセッションの寄与WALを削除対象にマーク
+      savedWalIds.addAll(sessionContributingWalIds);
       debugPrint('[AISA Offline] セッション保存 (${combined.length}文字)');
     }
 
-    // 同期完了後、処理済み.binファイルを自動削除（ストレージ節約＆再起動時の高速化）
+    // 【根本対策 2026-04-18】同期完了後のクリーンアップ
+    //   旧実装: diskWals すべてを無条件削除 → 「ノイズ判定」WALも永久消失していた。
+    //   新実装:
+    //     - 保存成功したWAL → ファイル削除 & リストから除去（従来通り）
+    //     - 失敗したWAL (retry < 3) → ファイル残存 & status=corrupted（次回起動時に miss へ復帰）
+    //     - 失敗したWAL (retry ≥ 3) → ファイル削除（永久に書き起こしできない音声の蓄積を防ぐ）
+    final prefs = await SharedPreferences.getInstance();
+    const retryKeyPrefix = 'aisa_offline_retry_';
+    const maxRetries = 3;
+
     int deletedFiles = 0;
+    int retainedFiles = 0;
+    int discardedAfterMaxRetries = 0;
+
     for (final wal in diskWals) {
-      try {
-        final fullPath = await Wal.getFilePath(wal.filePath);
-        if (fullPath != null) {
-          final file = File(fullPath);
-          if (await file.exists()) {
-            await file.delete();
-            deletedFiles++;
-          }
+      bool shouldDeleteFile;
+
+      if (savedWalIds.contains(wal.id)) {
+        // 保存成功 → 削除
+        shouldDeleteFile = true;
+        await prefs.remove('$retryKeyPrefix${wal.id}');
+      } else {
+        // 保存失敗（ノイズ判定 or API失敗 or セッション0件）
+        final retryKey = '$retryKeyPrefix${wal.id}';
+        final prevRetries = prefs.getInt(retryKey) ?? 0;
+        final newRetries = prevRetries + 1;
+
+        if (newRetries >= maxRetries) {
+          // リトライ上限到達 → 諦めて削除
+          shouldDeleteFile = true;
+          await prefs.remove(retryKey);
+          discardedAfterMaxRetries++;
+          AisaDebugLogger.instance.warning(
+              '[Offline] リトライ上限(${newRetries}回)のため破棄: ${wal.id}');
+        } else {
+          // リトライ可能 → ファイル保持 & corruptedへ遷移（次回起動時 miss に戻して再試行）
+          shouldDeleteFile = false;
+          await prefs.setInt(retryKey, newRetries);
+          wal.status = WalStatus.corrupted;
+          retainedFiles++;
         }
-      } catch (e) {
-        debugPrint('[AISA Offline] .bin削除失敗: $e');
+      }
+
+      if (shouldDeleteFile) {
+        try {
+          final fullPath = await Wal.getFilePath(wal.filePath);
+          if (fullPath != null) {
+            final file = File(fullPath);
+            if (await file.exists()) {
+              await file.delete();
+              deletedFiles++;
+            }
+          }
+        } catch (e) {
+          debugPrint('[AISA Offline] .bin削除失敗: $e');
+        }
       }
     }
-    // WALリストからも除去して永続化
+
+    // WALリストから status==synced のものだけ除去（corrupted は残る）。
+    // deleteAllSyncedWals は内部で _saveWalsToFile を呼ぶため、
+    // corrupted への status 変更もここで永続化される。
     try {
       await phoneSync.deleteAllSyncedWals();
     } catch (e) {
@@ -419,9 +483,9 @@ class AisaOfflineSyncService {
     }
 
     debugPrint('[AISA Offline] ${diskWals.length}チャンク → $savedSessions件保存 '
-        '(API呼出=$totalApiCalls, スキップ=$skipCount, 削除=$deletedFiles)');
+        '(API呼出=$totalApiCalls, スキップ=$skipCount, 削除=$deletedFiles, 保持=$retainedFiles, 諦め削除=$discardedAfterMaxRetries)');
     AisaDebugLogger.instance.info(
-        '[Offline] 完了: $savedSessions件保存 (API=$totalApiCalls スキップ=$skipCount 削除=$deletedFiles)');
+        '[Offline] 完了: $savedSessions件保存 (API=$totalApiCalls スキップ=$skipCount 削除=$deletedFiles 保持=$retainedFiles 諦め=$discardedAfterMaxRetries)');
   }
 
   /// 複数チャンクのPCMデータを1つのWAVファイルに結合
