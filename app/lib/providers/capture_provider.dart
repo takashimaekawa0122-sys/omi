@@ -142,6 +142,9 @@ class CaptureProvider extends ChangeNotifier
   final List<List<int>> _aisaPendingFrames = []; // 蓄積中のフレーム
   String _aisaAccumulatedText = ''; // 蓄積中のテキスト（複数チャンクをまとめる）
   String? _aisaPendingConversationId; // 仮表示中の会話ID（Groqチャンク蓄積中のUI即時表示用）
+  DateTime? _aisaPendingStartedAt; // 仮表示の開始時刻（経過秒数表示用）
+  // 蓄積テキストがこの文字数を超えたら、無音を待たずに即フラッシュする（長時間「文字起こし中...」を防ぐ）
+  static const int _aisaAccumulatedTextFlushThreshold = 400;
 
   // AISA: オフライン同期トランスクリプトのバッファ
   // conversationProvider が未初期化の場合はここに蓄積し、初期化後にまとめて追加する
@@ -1480,6 +1483,15 @@ class CaptureProvider extends ChangeNotifier
           AisaDebugLogger.instance.info('📎 チャンク蓄積: "${chunk.substring(0, chunk.length.clamp(0, 40))}..." (合計${_aisaAccumulatedText.length}文字)');
           // Option C: Groq結果を即座にUIへ仮表示（Claude校正完了前でも見える）
           _upsertAisaInterim(_aisaAccumulatedText);
+          // 改良B: 蓄積テキストが閾値（400文字）を超えたら、無音を待たずに即フラッシュ
+          // 長時間話し続けても「文字起こし中…」が2分以上続かないよう保証する
+          if (_aisaAccumulatedText.length >= _aisaAccumulatedTextFlushThreshold) {
+            AisaDebugLogger.instance.info(
+              '📝 蓄積${_aisaAccumulatedText.length}文字到達（閾値$_aisaAccumulatedTextFlushThreshold） → 即フラッシュ',
+            );
+            await _flushAisaText();
+            return;
+          }
         } else {
           // ハルシネーションとして除去された → 無音扱い
           _aisaSilentTicks++;
@@ -1583,6 +1595,7 @@ class CaptureProvider extends ChangeNotifier
     // 上書きしないようここでスナップショット＆クリアする
     final flushPendingId = _aisaPendingConversationId;
     _aisaPendingConversationId = null;
+    _aisaPendingStartedAt = null;
     _aisaSilentTicks = 0;
     _aisaBufferTicks = 0;
     _aisaPendingFrames.clear();
@@ -1608,6 +1621,21 @@ class CaptureProvider extends ChangeNotifier
       _aisaFlushing = false;
     }
   }
+
+  /// 改良E: 「今すぐ確定」ボタンから呼ばれる公開メソッド。
+  /// 蓄積中のテキストを即座にClaude校正→Firestore保存し、会話として確定する。
+  /// UI 側から pending カードをタップしたときに使う。
+  Future<void> flushAisaTextNow() async {
+    if (_aisaAccumulatedText.isEmpty) {
+      AisaDebugLogger.instance.info('⏭ 手動フラッシュ要求: 蓄積テキストが空のためスキップ');
+      return;
+    }
+    AisaDebugLogger.instance.info('✋ 手動フラッシュ要求（「今すぐ確定」ボタン）');
+    await _flushAisaText();
+  }
+
+  /// UI が「今すぐ確定」ボタン表示判定に使う: 現在仮表示中の pending 会話ID
+  String? get aisaPendingConversationId => _aisaPendingConversationId;
 
   /// WAVバイト列のRMS振幅を計算し、声が含まれているか判定する
   /// 44バイトのWAVヘッダーをスキップし、16bit PCMサンプルのRMSを計算
@@ -1747,16 +1775,25 @@ class CaptureProvider extends ChangeNotifier
     if (conversationProvider == null) return;
     if (interimText.trim().isEmpty) return;
     final now = DateTime.now();
-    _aisaPendingConversationId ??= 'aisa_pending_${now.millisecondsSinceEpoch}_${++_aisaConversationCounter}';
+    if (_aisaPendingConversationId == null) {
+      _aisaPendingConversationId = 'aisa_pending_${now.millisecondsSinceEpoch}_${++_aisaConversationCounter}';
+      _aisaPendingStartedAt = now;
+    }
+    // 改良C: 経過秒数をタイトルに表示（例: "文字起こし中…（45秒）"）
+    // ユーザーに「動いている」ことを示し、体感的な待ち時間を緩和する
+    final elapsedSec = _aisaPendingStartedAt == null
+        ? 0
+        : now.difference(_aisaPendingStartedAt!).inSeconds;
+    final title = elapsedSec > 0 ? '文字起こし中…（${elapsedSec}秒）' : '文字起こし中…';
     // 仮表示はタイトル固定、本文にGroq生テキストをそのまま表示
     final preview = interimText.length > 200
         ? '${interimText.substring(0, 200)}…'
         : interimText;
     final conversation = ServerConversation(
       id: _aisaPendingConversationId!,
-      createdAt: now,
+      createdAt: _aisaPendingStartedAt ?? now,
       structured: Structured(
-        '文字起こし中…',
+        title,
         preview,
         emoji: '✍️',
       ),

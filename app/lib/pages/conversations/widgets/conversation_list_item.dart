@@ -13,6 +13,7 @@ import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/pages/conversation_detail/conversation_detail_provider.dart';
 import 'package:omi/pages/conversation_detail/page.dart';
 import 'package:omi/pages/settings/usage_page.dart';
+import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/connectivity_provider.dart';
 import 'package:omi/providers/conversation_provider.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
@@ -333,6 +334,9 @@ class _ConversationListItemState extends State<ConversationListItem> {
     );
   }
 
+  /// 改良E: AISAの仮表示会話（aisa_pending_*）かどうかを判定
+  bool get _isAisaPending => widget.conversation.id.startsWith('aisa_pending_');
+
   Widget _buildMobileLayout(BuildContext context) {
     return Stack(
       children: [
@@ -413,10 +417,48 @@ class _ConversationListItemState extends State<ConversationListItem> {
                 ),
               ],
             ),
+            // 改良E: AISA仮表示カードには「今すぐ確定」ボタンを表示（長引く待機を手動で打ち切れる）
+            if (_isAisaPending) ...[
+              const SizedBox(height: 10),
+              _buildAisaFinalizeNowButton(context),
+            ],
           ],
         ),
         if (widget.conversation.isLocked) _buildLockedOverlay(),
       ],
+    );
+  }
+
+  /// 改良E: 仮表示カード用の「今すぐ確定」ボタン。タップで CaptureProvider.flushAisaTextNow を呼ぶ
+  Widget _buildAisaFinalizeNowButton(BuildContext context) {
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: GestureDetector(
+        onTap: () async {
+          HapticFeedback.lightImpact();
+          final captureProvider = context.read<CaptureProvider>();
+          await captureProvider.flushAisaTextNow();
+        },
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+          decoration: BoxDecoration(
+            color: Colors.deepPurple.withValues(alpha: 0.25),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: Colors.deepPurple.withValues(alpha: 0.6), width: 1),
+          ),
+          child: const Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.check_circle_outline, color: Colors.white, size: 16),
+              SizedBox(width: 6),
+              Text(
+                '今すぐ確定',
+                style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w600),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 
