@@ -146,6 +146,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
 
   CaptureProvider? _captureProvider;
 
+  /// アプリ起動時刻（自動同期抑止の判定用）
+  final DateTime _appLaunchedAt = DateTime.now();
+
+  /// 【クラッシュループ対策】起動後60秒以内なら自動 syncWalsViaBle を抑止する。
+  /// 起動直後にBLE接続・WAL同期・Firestore読み込み・オフライン文字起こしが
+  /// 同時進行すると iOS Watchdog にキルされる不具合への対策。
+  /// ユーザー報告: 起動後数秒で繰り返しクラッシュ→再起動ループ。
+  bool _isInAppLaunchCooldown() {
+    return DateTime.now().difference(_appLaunchedAt) < const Duration(seconds: 60);
+  }
+
   void _initiateApps() {
     context.read<AppProvider>().getApps();
     context.read<AppProvider>().getPopularApps();
@@ -492,6 +503,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
         // ただし同期直後の再接続で再度同期が発火するのを防ぐため、
         // 同期完了から30秒以内の再接続ではスキップする
         if (!mounted) return;
+        // 【重要】起動後60秒間は自動同期を抑制する。
+        // 起動直後にBLE接続・WAL同期・Firestore読み込みが同時進行すると
+        // ウォームアップキャンセル→再開の競合でクラッシュを誘発する。
+        // ユーザーは手動同期ボタンから明示的に実行可能。
+        if (_isInAppLaunchCooldown()) {
+          Logger.debug('[AISA] 起動後60秒以内のため自動同期を抑止（デバイス接続）');
+          return;
+        }
         if (!syncProvider.isSyncing && !syncProvider.isInPostSyncCooldown) {
           Logger.debug('[AISA] デバイス接続検知 → 自動SDカード同期開始');
           await syncProvider.syncWalsViaBle();
@@ -508,6 +527,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
       // ファームウェア >= 3.0.17 のデバイスではファイル数検出後に呼ばれる
       // BLE固定（WiFiはタイムアウトリスクあり）
       deviceProvider.onOfflineDataDetected = (device, fileCount, totalBytes) async {
+        // 起動直後の自動同期は競合でクラッシュを誘発するため抑制
+        if (_isInAppLaunchCooldown()) {
+          Logger.debug('[AISA] 起動後60秒以内のため自動同期を抑止（オフラインデータ検知 $fileCount件）');
+          return;
+        }
         if (!syncProvider.isSyncing && !syncProvider.isInPostSyncCooldown) {
           Logger.debug('[AISA] オフラインデータ検知 ($fileCount件) → 自動SDカード同期開始');
           await syncProvider.syncWalsViaBle();
