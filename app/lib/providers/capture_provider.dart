@@ -129,7 +129,10 @@ class CaptureProvider extends ChangeNotifier
   DateTime? _aisaLastVoiceAt; // 最後に音声を検出した時刻
   int _aisaSilentTicks = 0; // 連続無音ティック数（5秒×N）
   static const int _aisaSilenceThreshold = 2; // 2ティック（10秒）無音で会話の区切りと判定
-  static const int _aisaMaxBufferTicks = 36; // 最大36ティック（180秒=3分）でフラッシュ
+  // 【UX改善 2026-04-19】最大バッファ時間を 180秒→90秒 に短縮。
+  // 話し続けている場合でも「文字起こし中…」が最大90秒で確定するよう保証する。
+  // 長い発話は2カードに分かれるが、Claude校正は各カード独立で実行されるため品質は保たれる。
+  static const int _aisaMaxBufferTicks = 18; // 最大18ティック（90秒）でフラッシュ
   // VAD閾値: 会話相手の声（遠方・RMS 100〜400）も拾えるように大幅に緩和。
   // ほぼ完全な無音のみスキップし、あとはWhisperのno_speech_prob判定に委ねる。
   static const double _aisaVadRmsThreshold = 100.0;
@@ -144,7 +147,9 @@ class CaptureProvider extends ChangeNotifier
   String? _aisaPendingConversationId; // 仮表示中の会話ID（Groqチャンク蓄積中のUI即時表示用）
   DateTime? _aisaPendingStartedAt; // 仮表示の開始時刻（経過秒数表示用）
   // 蓄積テキストがこの文字数を超えたら、無音を待たずに即フラッシュする（長時間「文字起こし中...」を防ぐ）
-  static const int _aisaAccumulatedTextFlushThreshold = 400;
+  // 【UX改善 2026-04-19】400→200 に短縮: 話し続けても約30〜40秒で確定。
+  // 長い会話は複数カードに分かれるが、各カード独立でClaude校正されるため自然な意味単位になる。
+  static const int _aisaAccumulatedTextFlushThreshold = 200;
 
   // AISA: オフライン同期トランスクリプトのバッファ
   // conversationProvider が未初期化の場合はここに蓄積し、初期化後にまとめて追加する
