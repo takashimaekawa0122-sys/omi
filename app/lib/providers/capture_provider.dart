@@ -1162,6 +1162,20 @@ class CaptureProvider extends ChangeNotifier
     // Send current location when conversation starts
     _sendCurrentGeolocation();
 
+    // 【Fix D】BLE再接続などでセッションが切り替わる前に、蓄積中のライブバッファを
+    // 強制Flush（Claude校正→Firestore保存）する。_flushAisaText 内で同期的に
+    // rawText をキャプチャしてから await に入るため、直後の _resetStateVariables で
+    // _aisaAccumulatedText='' されても、キャプチャ済みテキストは失われない。
+    // これが無いと、オフライン中に溜めた会話（例: 171文字）が
+    // 再接続で session ID がリセットされた瞬間に消える。
+    if (_aisaAccumulatedText.isNotEmpty) {
+      AisaDebugLogger.instance.info(
+        '♻ BLE再接続検出 → 蓄積${_aisaAccumulatedText.length}文字を強制Flushしてからリセット',
+      );
+      // fire-and-forget（rawTextは同期的に捕獲される）
+      _triggerAisaTranscription(forceFlush: true);
+    }
+
     await _resetStateVariables();
     await _resetState();
 

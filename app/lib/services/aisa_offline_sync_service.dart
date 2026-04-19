@@ -280,7 +280,9 @@ class AisaOfflineSyncService {
             // 以前の閾値 500 は会話相手・装着者の遠めの発話まで大量に捨てていた。
             // セグメント単位のVAD（_kSegmentQuietRms=80）・Whisperのno_speech_prob
             // で後段で細かく判定するため、ここでは「ほぼ完全な無音」のみ除外する。
-            if (rms <= 120) {
+            // 【Fix E】ライブVAD閾値(100)と揃えるため 120→95 に引き下げ。
+            // 声が小さめでもオフライン同期で拾えるようにする。
+            if (rms <= 95) {
               skipCount++;
               AisaDebugLogger.instance.vad(
                   '[Offline] チャンク除外(rms=$rms): ${wal.filePath}');
