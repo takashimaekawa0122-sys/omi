@@ -144,10 +144,10 @@ class AisaTranscriptionService {
   /// 失敗時は例外をthrow（呼び出し元でリトライ処理するため）
   /// WAVファイルの削除は呼び出し元の責任
   ///
-  /// 【ライブ優先ゲート】オフライン側はAPI送信直前に必ず待機ポイントを通る。
-  /// これによりリトライループ内でライブに割り込むことを防ぐ。
+  /// 【Fix G】旧: ライブ優先ゲートで待機していたが、BLE再接続直後のライブ連続発火で
+  /// isLiveActive が常時 true → オフライン永久待機の原因になっていたため撤廃。
+  /// Groq無料枠 20req/min はライブ+オフライン並行でも余裕（実効7req/min）。
   Future<String?> transcribeOnly(File wavFile, {String? previousContext}) async {
-    await waitForLiveQuiet();
     return await _transcribe(wavFile, previousContext: previousContext); // 例外はそのまま上に伝播
   }
 

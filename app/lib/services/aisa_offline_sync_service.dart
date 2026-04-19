@@ -329,11 +329,15 @@ class AisaOfflineSyncService {
         // 結合WAVをGroq Whisperで文字起こし
         final combinedFile = await _writeTempWav(combinedWav, 'aisa_batch_${batch.first.id}.wav');
 
-        // ライブ優先制御: ライブ会話がAPI呼び出し中/直近ならそちらを優先して待機
-        if (AisaTranscriptionService.instance.isLiveActive) {
-          AisaDebugLogger.instance.info('[Offline] ライブ会話進行中 → API呼び出しを待機');
-          await AisaTranscriptionService.instance.waitForLiveQuiet();
-        }
+        // 【Fix G】ライブ優先待機を撤廃し、ライブと並行してGroqに送信する。
+        // 旧ロジックはBLE再接続直後にライブが5秒ティックで発火し続けるため
+        // _lastLiveCallAt が毎回更新され isLiveActive が常に true → オフラインが
+        // 永久待機 → アプリクラッシュ（セッション再起動ループ）に陥っていた。
+        //
+        // Groq無料枠 20req/min に対してライブ(6req/min) + オフライン(1req/min)は
+        // 十分余裕がある。万一 rate limit に当たった場合は下流の catch 内で
+        // 60秒リトライして自己回復する。
+        // （旧: isLiveActive→waitForLiveQuiet の2重ガードを撤廃）
         if (_isCancelled) {
           try { await combinedFile.delete(); } catch (_) {}
           break;
