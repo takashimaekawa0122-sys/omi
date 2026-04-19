@@ -247,7 +247,24 @@ class AisaTranscriptionService {
       if (_anthropicApiKey.isNotEmpty) {
         AisaDebugLogger.instance.info('Claude校正: 開始 (${rawText.length}文字)');
         final corrected = await _correctWithClaude(rawText);
-        if (corrected != null && corrected.trim().isNotEmpty) {
+        // 【Fix H】_correctWithClaude は仕様上、以下のように値を返す:
+        //   ・成功                 → 校正後テキスト
+        //   ・API エラー/空応答     → fallbackText（Whisper結果、null ではない）
+        //   ・ハルシネーション検出  → null
+        // つまり null が返るのはハルシネーション確定ケースのみ。この場合は
+        // Firestore に保存せずに correctAndSave も null を返して、呼び出し元
+        // (_flushAisaText) が仮表示カードを消すようにする。
+        // 旧実装は null の場合に cleanRawText を保存していたため、Whisper が
+        // 生成した「日本語の字幕は、ご覧いただきありがとうございます…」等の
+        // YouTube 定型ハルシネーションがそのままユーザーの会話履歴に
+        // 残り続けていた。
+        if (corrected == null) {
+          AisaDebugLogger.instance.warning(
+            '⚠ ハルシネーション判定 → Firestore保存スキップ (raw=${rawText.length}文字)',
+          );
+          return null;
+        }
+        if (corrected.trim().isNotEmpty) {
           result = corrected;
         }
       }
@@ -757,6 +774,10 @@ class AisaTranscriptionService {
       'ご清聴ありがとうございます',
       '字幕視聴ありがとうございました',
       'ご覧いただきありがとうございました',
+      'ご覧いただきありがとうございます', // 【Fix I 2026-04-19】非過去形も追加
+      'ご覧いただきありがとう',           // 略形（Whisperが末尾を端折るケース）
+      '日本語の字幕は、ご覧いただきありがとうございました',
+      '日本語の字幕は、ご覧いただきありがとうございます',
       'お聞きいただきありがとうございました',
       // チャンネル系
       'チャンネル登録お願いします',
@@ -889,6 +910,11 @@ class AisaTranscriptionService {
       'ベルマーク',
       'コメント欄',
       '概要欄',
+      // 【Fix I 2026-04-19】YouTube動画ラストで頻出する「日本語の字幕」系ハルシネーション。
+      // 例「日本語の字幕は、ご覧いただきありがとうございます。」が401文字まで蓄積
+      // して Firestore に保存されたケースがあったため、チャンク段階で弾く。
+      '日本語の字幕',
+      '字幕は、ご覧いただき',
       '動画をご覧',
       '動画を最後まで',
       '次回の動画',
