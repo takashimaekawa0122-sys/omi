@@ -435,10 +435,16 @@ class AisaOfflineSyncService {
       } catch (e) {
         AisaDebugLogger.instance.warning('[Offline] ストリーム送出失敗: $e');
       }
-      savedSessions++;
-      // 【根本対策 2026-04-18】セッション保存成功 → このセッションの寄与WALを削除対象にマーク
-      savedWalIds.addAll(sessionContributingWalIds);
-      debugPrint('[AISA Offline] セッション保存 (${combined.length}文字)');
+      if (docId != null) {
+        savedSessions++;
+        // 【根本対策 2026-04-18 / 修正 2026-04-22】Firestore保存成功(docId!=null)時のみ削除対象にマーク。
+        // 失敗時はelse分岐でWAL保持 → 次回起動時のリトライ機構(最大3回)で再送される。
+        savedWalIds.addAll(sessionContributingWalIds);
+        debugPrint('[AISA Offline] セッション保存 (${combined.length}文字)');
+      } else {
+        AisaDebugLogger.instance.warning(
+            '[Offline] Firestore保存未成立 → WAL保持(次回リトライ): ${sessionContributingWalIds.length}チャンク');
+      }
     }
 
     // 【根本対策 2026-04-18】同期完了後のクリーンアップ
