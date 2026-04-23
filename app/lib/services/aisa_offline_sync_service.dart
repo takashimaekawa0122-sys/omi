@@ -81,8 +81,16 @@ class AisaOfflineSyncService {
   /// 手動同期（SDカード転送）が完了したことをSyncProviderから通知する。
   /// これによりオフライン同期側のウォームアップ基準時刻が更新され、
   /// 同期完了後の数分間ライブ文字起こしを優先させる。
-  /// もしオフライン同期がすでに走っていた場合はキャンセルして、
-  /// 新しいウォームアップ起点で再スタートさせる。
+  ///
+  /// 【2026-04-24 修正】旧仕様では進行中のオフライン同期を _isCancelled=true で
+  /// 強制キャンセルしていた。しかし syncWals の finally から本メソッドが呼ばれる際、
+  /// 同じ syncWals の AISA Phase が直前に起動した syncPendingWals を殺してしまい、
+  /// 未処理WALが「保持=1」で終わる致命バグを起こしていた
+  /// （ログ 2026-04-24 06:54:23 で確定）。
+  /// 「再開の実装が無い」ため旧仕様は実質的にデータ処理遅延を生むだけだったので
+  /// キャンセル処理を撤廃。古い同期と手動同期の競合は syncWals 冒頭の
+  /// _cancelAisaSyncIfNeeded と wal_syncs AISA Phase の
+  /// `!AisaOfflineSyncService.instance.isSyncing` チェックで別途担保済み。
   void notifyOfSyncCompletion() {
     _lastSyncCompletedAt = DateTime.now();
     AisaDebugLogger.instance.info(
@@ -93,11 +101,7 @@ class AisaOfflineSyncService {
         'wasRunning': _isSyncing,
       },
     );
-    // 走っている最中なら即キャンセル（新ウォームアップ起点で再開させる）
-    if (_isSyncing) {
-      _isCancelled = true;
-      debugPrint('[AISA Offline] 同期完了通知 → 進行中オフライン同期をキャンセル');
-    }
+    // _isCancelled=true は撤廃（旧: 進行中syncをキャンセル → 未処理WAL保持バグの原因）
   }
 
   /// 進行中の同期を中断する（手動同期開始時にSyncProviderから呼ばれる）
