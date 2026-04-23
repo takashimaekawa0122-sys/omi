@@ -59,6 +59,7 @@ import 'package:omi/utils/platform/platform_service.dart';
 import 'package:omi/services/announcement_service.dart';
 import 'package:omi/services/notifications.dart';
 import 'package:omi/services/notifications/daily_reflection_notification.dart';
+import 'package:omi/utils/aisa_debug_logger.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/audio/foreground.dart';
 import 'package:omi/utils/enums.dart';
@@ -503,12 +504,30 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
         // ただし同期直後の再接続で再度同期が発火するのを防ぐため、
         // 同期完了から30秒以内の再接続ではスキップする
         if (!mounted) return;
-        // 【重要】起動後60秒間は自動同期を抑制する。
+        // 【重要 / 2026-04-23 修正】起動後60秒間は自動同期を抑制する。
         // 起動直後にBLE接続・WAL同期・Firestore読み込みが同時進行すると
         // ウォームアップキャンセル→再開の競合でクラッシュを誘発する。
-        // ユーザーは手動同期ボタンから明示的に実行可能。
+        // ただし従来「return」で完全スキップしていたため、BLE接続イベントが
+        // クールダウン中にしか発火しないケースでは同期が永久に起動しなかった。
+        // → クールダウン明け+2秒マージン後に遅延実行するよう変更。
+        //   重複実行は syncProvider.isSyncing と _isSyncing(Offline) で二重防止済み。
         if (_isInAppLaunchCooldown()) {
-          Logger.debug('[AISA] 起動後60秒以内のため自動同期を抑止（デバイス接続）');
+          final remaining = const Duration(seconds: 60) - DateTime.now().difference(_appLaunchedAt);
+          Logger.debug('[AISA] 起動クールダウン中 → ${remaining.inSeconds}秒後に遅延実行（デバイス接続）');
+          AisaDebugLogger.instance.info(
+            '[Sync] 起動クールダウン中 → 遅延実行予約（デバイス接続）',
+            context: {'remainingSec': remaining.inSeconds.toString()},
+          );
+          Future.delayed(remaining + const Duration(seconds: 2), () async {
+            if (!mounted) return;
+            if (syncProvider.isSyncing || syncProvider.isInPostSyncCooldown) {
+              AisaDebugLogger.instance.info('[Sync] 遅延実行スキップ（既に同期中/クールダウン中）');
+              return;
+            }
+            Logger.debug('[AISA] 起動クールダウン明け → 遅延自動SDカード同期開始');
+            AisaDebugLogger.instance.info('[Sync] 遅延実行発火（デバイス接続）');
+            await syncProvider.syncWalsViaBle();
+          });
           return;
         }
         if (!syncProvider.isSyncing && !syncProvider.isInPostSyncCooldown) {
@@ -527,9 +546,30 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
       // ファームウェア >= 3.0.17 のデバイスではファイル数検出後に呼ばれる
       // BLE固定（WiFiはタイムアウトリスクあり）
       deviceProvider.onOfflineDataDetected = (device, fileCount, totalBytes) async {
-        // 起動直後の自動同期は競合でクラッシュを誘発するため抑制
+        // 【2026-04-23 修正】起動直後の自動同期は競合でクラッシュを誘発するため抑制。
+        // 従来「return」で完全スキップしていたが、ファームウェア通知による検知タイミングが
+        // 常にクールダウン内に落ちるケースで同期が永久に起動しなかった。
+        // → クールダウン明け+2秒マージン後に遅延実行するよう変更。
         if (_isInAppLaunchCooldown()) {
-          Logger.debug('[AISA] 起動後60秒以内のため自動同期を抑止（オフラインデータ検知 $fileCount件）');
+          final remaining = const Duration(seconds: 60) - DateTime.now().difference(_appLaunchedAt);
+          Logger.debug('[AISA] 起動クールダウン中 → ${remaining.inSeconds}秒後に遅延実行（オフラインデータ検知 $fileCount件）');
+          AisaDebugLogger.instance.info(
+            '[Sync] 起動クールダウン中 → 遅延実行予約（オフラインデータ）',
+            context: {
+              'remainingSec': remaining.inSeconds.toString(),
+              'fileCount': fileCount.toString(),
+            },
+          );
+          Future.delayed(remaining + const Duration(seconds: 2), () async {
+            if (!mounted) return;
+            if (syncProvider.isSyncing || syncProvider.isInPostSyncCooldown) {
+              AisaDebugLogger.instance.info('[Sync] 遅延実行スキップ（既に同期中/クールダウン中）');
+              return;
+            }
+            Logger.debug('[AISA] 起動クールダウン明け → 遅延自動SDカード同期開始（オフライン $fileCount件）');
+            AisaDebugLogger.instance.info('[Sync] 遅延実行発火（オフラインデータ）');
+            await syncProvider.syncWalsViaBle();
+          });
           return;
         }
         if (!syncProvider.isSyncing && !syncProvider.isInPostSyncCooldown) {
