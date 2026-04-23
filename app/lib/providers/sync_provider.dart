@@ -521,16 +521,24 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
   /// WiFiはBLEより100〜1000倍高速（BLE: 1〜10KB/s → WiFi: 1MB/s以上）
   /// デバイス接続時・アプリ起動時に自動呼び出しされる
   Future<void> syncWalsViaBle() async {
+    // 【診断ログ 2026-04-23】オフライン同期の入口到達を可視化する。
+    // 到達しない場合は、ここより手前(60秒抑止 / デバイス未対応 / コールバック未登録)が原因。
+    AisaDebugLogger.instance.info('[Sync] syncWalsViaBle 呼出');
     final previousMethod = SharedPreferencesUtil().preferredSyncMethod;
     // WiFi対応デバイスならWiFiを優先（BLEは低速すぎて長時間録音に耐えられない）
     final wifiSupported = await _walService.getSyncs().sdcard.isWifiSyncSupported();
     SharedPreferencesUtil().preferredSyncMethod = wifiSupported ? 'wifi' : 'ble';
     Logger.debug('[AISA] 自動同期: ${wifiSupported ? "WiFi" : "BLE"}モードで開始');
+    AisaDebugLogger.instance.info(
+      '[Sync] 同期モード確定: ${wifiSupported ? "WiFi" : "BLE"}',
+      context: {'mode': wifiSupported ? 'wifi' : 'ble'},
+    );
     try {
       await syncWals();
     } finally {
       // 同期後に元の設定を復元（ユーザーの選択を変更しない）
       SharedPreferencesUtil().preferredSyncMethod = previousMethod;
+      AisaDebugLogger.instance.info('[Sync] syncWalsViaBle 終了');
     }
   }
 

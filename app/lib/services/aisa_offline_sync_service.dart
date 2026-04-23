@@ -112,7 +112,18 @@ class AisaOfflineSyncService {
     List<Wal> pendingWals,
     LocalWalSyncImpl phoneSync,
   ) async {
-    if (_isSyncing) return; // 二重実行防止
+    // 【診断ログ 2026-04-23】オフライン同期の呼出履歴を可視化する。
+    AisaDebugLogger.instance.info(
+      '[Offline] syncPendingWals 呼出',
+      context: {
+        'pending': pendingWals.length,
+        'isSyncing': _isSyncing,
+      },
+    );
+    if (_isSyncing) {
+      AisaDebugLogger.instance.info('[Offline] 既に同期中 → 二重実行スキップ');
+      return; // 二重実行防止
+    }
     _isCancelled = false;
     _isSyncing = true;
 
@@ -120,6 +131,7 @@ class AisaOfflineSyncService {
       await _syncPendingWalsInternal(pendingWals, phoneSync);
     } finally {
       _isSyncing = false; // 例外が発生しても必ずリセット
+      AisaDebugLogger.instance.info('[Offline] syncPendingWals 終了');
     }
   }
 
@@ -140,6 +152,14 @@ class AisaOfflineSyncService {
         .toList();
 
     if (diskWals.isEmpty) {
+      // 【診断ログ 2026-04-23】pending WAL はあったが disk 保管のものが0件だった場合を可視化する。
+      AisaDebugLogger.instance.info(
+        '[Offline] diskWal 0件 → 同期対象なし',
+        context: {
+          'totalPending': pendingWals.length,
+          'diskFiltered': 0,
+        },
+      );
       return;
     }
 
